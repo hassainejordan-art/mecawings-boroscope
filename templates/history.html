@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+
+{% block title %}Report History{% endblock %}
+
+{% block content %}
+<section class="page-hero">
+    <h1>Report History</h1>
+    <p class="hero-subtitle">Search and reopen previously generated borescope inspection reports</p>
+</section>
+
+<section class="card">
+    <div class="card-header">
+        <h2>Search Reports</h2>
+    </div>
+    <form method="GET" action="{{ url_for('history') }}" class="search-form">
+        <div class="form-grid">
+            <div class="form-group">
+                <label for="report_number">Report Number</label>
+                <input type="text" id="report_number" name="report_number" placeholder="MW_2026_0001"
+                    value="{{ search.report_number }}">
+            </div>
+            <div class="form-group">
+                <label for="registration">Registration</label>
+                <input type="text" id="registration" name="registration" placeholder="F-GZHV"
+                    value="{{ search.registration }}">
+            </div>
+            <div class="form-group">
+                <label for="msn">MSN</label>
+                <input type="text" id="msn" name="msn" placeholder="MSN number"
+                    value="{{ search.msn }}">
+            </div>
+            <div class="form-group">
+                <label for="engine_sn">Engine Serial Number</label>
+                <input type="text" id="engine_sn" name="engine_sn" placeholder="Engine S/N"
+                    value="{{ search.engine_sn }}">
+            </div>
+        </div>
+        <div class="search-actions">
+            <button type="submit" class="btn btn-primary">Search</button>
+            <a href="{{ url_for('history') }}" class="btn btn-secondary">Clear</a>
+        </div>
+    </form>
+</section>
+
+<section class="card">
+    <div class="card-header">
+        <h2>Results</h2>
+        <span class="photo-count-badge">{{ results|length }} report{% if results|length != 1 %}s{% endif %}</span>
+    </div>
+
+    {% if results %}
+    <div class="history-table-wrap">
+        <table class="history-table">
+            <thead>
+                <tr>
+                    <th>Report Number</th>
+                    <th>Date</th>
+                    <th>Customer</th>
+                    <th>Aircraft</th>
+                    <th>Engine</th>
+                    <th>Registration</th>
+                    <th>Engine S/N</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for report in results %}
+                <tr>
+                    <td><strong>{{ report.report_number }}</strong></td>
+                    <td>{{ report.date or '—' }}</td>
+                    <td>{{ report.customer or '—' }}</td>
+                    <td>{{ report.aircraft or '—' }}</td>
+                    <td>{{ report.engine_type or '—' }}</td>
+                    <td>{{ report.registration or '—' }}</td>
+                    <td>{{ report.engine_sn or '—' }}</td>
+                    <td class="history-actions">
+                        {% if report.pdf_filename %}
+                        <a href="{{ url_for('download_pdf', report_key=report.folder_name, filename=report.pdf_filename) }}"
+                           class="btn btn-secondary btn-small">Download PDF</a>
+                        {% endif %}
+                        <a href="{{ url_for('edit_report', folder_name=report.folder_name) }}"
+                           class="btn btn-primary btn-small">Reopen / Edit</a>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="gallery-empty">
+        <p>No reports found.{% if search.report_number or search.registration or search.msn or search.engine_sn %} Try adjusting your search.{% else %} Create your first report to see it here.{% endif %}</p>
+    </div>
+    {% endif %}
+</section>
+{% endblock %}

@@ -10,41 +10,52 @@
             <path d="M22 4L12 14.01l-3-3"/>
         </svg>
     </div>
-    <h1>Report Generated Successfully</h1>
-    <p class="hero-subtitle">Your CFM56 borescope inspection report is ready for download</p>
+    <h1>{% if updated %}Report Updated Successfully{% else %}Report Generated Successfully{% endif %}</h1>
+    <p class="hero-subtitle">Report <strong>{{ report_number }}</strong> is ready for download</p>
 </section>
 
 <section class="card">
     <div class="card-header">
         <h2>Report Details</h2>
+        <span class="report-number-pill">{{ report_number }}</span>
     </div>
     <div class="details-grid">
+        <div class="detail-item"><span class="detail-label">Report Number</span><span class="detail-value">{{ report_number }}</span></div>
+        <div class="detail-item"><span class="detail-label">Folder</span><span class="detail-value detail-value-small">{{ folder_name }}</span></div>
         <div class="detail-item"><span class="detail-label">Customer</span><span class="detail-value">{{ report.customer }}</span></div>
-        <div class="detail-item"><span class="detail-label">Aircraft</span><span class="detail-value">{{ report.aircraft }}</span></div>
+        <div class="detail-item"><span class="detail-label">Aircraft Type</span><span class="detail-value">{{ report.aircraft }}</span></div>
+        <div class="detail-item"><span class="detail-label">Engine Type</span><span class="detail-value">{{ report.engine_type or '—' }}</span></div>
         <div class="detail-item"><span class="detail-label">Registration</span><span class="detail-value">{{ report.registration or '—' }}</span></div>
         <div class="detail-item"><span class="detail-label">MSN</span><span class="detail-value">{{ report.msn or '—' }}</span></div>
         <div class="detail-item"><span class="detail-label">Engine S/N</span><span class="detail-value">{{ report.engine_sn }}</span></div>
-        <div class="detail-item"><span class="detail-label">Position</span><span class="detail-value">{{ report.engine_position }}</span></div>
-        <div class="detail-item"><span class="detail-label">Date</span><span class="detail-value">{{ report.date }}</span></div>
+        <div class="detail-item"><span class="detail-label">Engine Position</span><span class="detail-value">{{ report.engine_position or '—' }}</span></div>
+        <div class="detail-item detail-item-full"><span class="detail-label">Inspected Areas</span><span class="detail-value">{{ report.inspected_areas | join(', ') if report.inspected_areas else '—' }}</span></div>
+        <div class="detail-item"><span class="detail-label">Inspection Date</span><span class="detail-value">{{ report.date or '—' }}</span></div>
         <div class="detail-item"><span class="detail-label">P/O</span><span class="detail-value">{{ report.po or '—' }}</span></div>
+        <div class="detail-item"><span class="detail-label">Inspector Name</span><span class="detail-value">{{ report.inspector or '—' }}</span></div>
         <div class="detail-item"><span class="detail-label">Findings</span><span class="detail-value">{{ photo_count }}</span></div>
     </div>
 
-    {% set acceptable = photos | selectattr('severity', 'equalto', 'Acceptable') | list | length %}
-    {% set monitor = photos | selectattr('severity', 'equalto', 'Monitor') | list | length %}
-    {% set reject = photos | selectattr('severity', 'equalto', 'Reject') | list | length %}
+    {% if has_signature and signature_url %}
+    <div class="signature-preview-section">
+        <p class="detail-label">Inspector Signature</p>
+        <div class="signature-preview-box">
+            <img src="{{ signature_url }}" alt="Inspector signature" class="signature-preview-image">
+        </div>
+    </div>
+    {% endif %}
 
     <div class="summary-bar summary-bar-inline">
         <div class="summary-item summary-acceptable">
-            <span class="summary-count">{{ acceptable }}</span>
+            <span class="summary-count">{{ classification_counts.Acceptable }}</span>
             <span class="summary-label">Acceptable</span>
         </div>
         <div class="summary-item summary-monitor">
-            <span class="summary-count">{{ monitor }}</span>
+            <span class="summary-count">{{ classification_counts.Monitor }}</span>
             <span class="summary-label">Monitor</span>
         </div>
         <div class="summary-item summary-reject">
-            <span class="summary-count">{{ reject }}</span>
+            <span class="summary-count">{{ classification_counts.Reject }}</span>
             <span class="summary-label">Reject</span>
         </div>
         <div class="summary-item summary-total">
@@ -55,7 +66,7 @@
 
     {% if pdf_filename %}
     <div class="download-section">
-        <a href="{{ url_for('download_pdf', report_id=report_id, filename=pdf_filename) }}" class="btn btn-primary btn-large">
+        <a href="{{ url_for('download_pdf', report_key=folder_name, filename=pdf_filename) }}" class="btn btn-primary btn-large">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
                 <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
                 <path d="M7 10l5 5 5-5M12 15V3"/>
@@ -73,19 +84,21 @@
     </div>
     <div class="photo-gallery photo-gallery-readonly">
         {% for photo in photos %}
-        <article class="photo-card photo-card-readonly severity-{{ photo.severity|lower }}">
+        <article class="photo-card photo-card-readonly classification-{{ photo.classification|default(photo.severity)|lower }}">
             <div class="photo-card-image">
                 <span class="photo-number-badge">#{{ loop.index }}</span>
-                <img src="{{ url_for('static', filename='photos/' + report_id + '/' + photo.stored_name) }}" alt="{{ photo.filename }}">
-                <span class="classification-badge badge-{{ photo.severity|lower }}">{{ photo.severity }}</span>
+                <img src="{{ url_for('report_files', folder_name=folder_name, filename='photos/' + photo.stored_name) }}" alt="{{ photo.filename }}">
+                <span class="classification-badge badge-{{ photo.classification|default(photo.severity)|lower }}">{{ photo.classification|default(photo.severity) }}</span>
             </div>
             <div class="photo-card-body">
                 <p class="photo-filename">{{ photo.filename }}</p>
                 <p class="photo-area"><strong>Area:</strong> {{ photo.area }}</p>
-                {% if photo.defect_description %}
-                <p class="photo-comment">{{ photo.defect_description }}</p>
+                <p class="photo-area"><strong>Defect:</strong> {{ photo.defect_category|default('—') }}</p>
+                {% set comment = photo.comment|default(photo.defect_description, true) %}
+                {% if comment %}
+                <p class="photo-comment">{{ comment }}</p>
                 {% else %}
-                <p class="photo-comment photo-comment-empty">No defect description</p>
+                <p class="photo-comment photo-comment-empty">No comment</p>
                 {% endif %}
             </div>
         </article>
@@ -94,6 +107,7 @@
 </section>
 
 <div class="page-actions">
-    <a href="{{ url_for('home') }}" class="btn btn-secondary">Create New Report</a>
+    <a href="{{ url_for('home') }}" class="btn btn-secondary">New Report</a>
+    <a href="{{ url_for('history') }}" class="btn btn-secondary">Report History</a>
 </div>
 {% endblock %}

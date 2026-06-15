@@ -20,6 +20,12 @@ static/reports/*
 static/img/logo.png
 static/img/test_upload.jpg
 
+# Logo (add your file locally)
+static/logo/mecawings_logo.png
+
+# Report counter state
+data/report_counter.json
+
 # OS / editor
 .DS_Store
 .idea/

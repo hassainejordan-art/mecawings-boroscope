@@ -1,6 +1,5 @@
 import json
 import os
-import uuid
 from datetime import datetime
 
 from flask import (
@@ -15,216 +14,571 @@ from flask import (
 )
 from werkzeug.utils import secure_filename
 
-from constants import ENGINE_AREAS, SEVERITY_LEVELS
+from constants import (
+    AIRCRAFT_TYPES,
+    CERTIFICATION_TEXT,
+    CLASSIFICATION_LEVELS,
+    CUSTOM_OPTION,
+    DEFECT_CATEGORIES,
+    ENGINE_POSITIONS,
+    ENGINE_TYPE_GROUPS,
+    ENGINE_TYPES,
+    INSPECTION_AREAS,
+    REPORT_SUBTITLE,
+    REPORT_TITLE,
+    SEVERITY_LEVELS,
+)
 from pdf_generator import generate_borescope_report
+from report_numbering import allocate_report_number, peek_next_report_number, sync_counter_from_reports
+from report_storage import (
+    build_folder_name,
+    find_report_dir,
+    get_pdf_path,
+    get_photos_dir,
+    get_report_dir,
+    get_reports_root,
+    list_all_reports,
+    load_metadata,
+    pdf_filename_for,
+    photo_paths_for_metadata,
+    save_metadata,
+    search_reports,
+)
+from signature_utils import save_signature_data_url
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "boro-report-dev-key-change-in-production")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_FOLDER = os.path.join(BASE_DIR, "static", "photos")
-REPORTS_FOLDER = os.path.join(BASE_DIR, "static", "reports")
-LOGO_PATH = os.path.join(BASE_DIR, "static", "img", "logo.png")
+REPORTS_FOLDER = get_reports_root(BASE_DIR)
+LOGO_PATH = os.path.join(BASE_DIR, "static", "logo", "mecawings_logo.png")
+DATA_FOLDER = os.path.join(BASE_DIR, "data")
 
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp", "heic", "heif"}
 
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(REPORTS_FOLDER, exist_ok=True)
-os.makedirs(os.path.join(BASE_DIR, "static", "img"), exist_ok=True)
+os.makedirs(os.path.join(BASE_DIR, "static", "logo"), exist_ok=True)
+os.makedirs(DATA_FOLDER, exist_ok=True)
+sync_counter_from_reports(BASE_DIR)
 
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB
+
+
+def logo_exists():
+    return os.path.exists(LOGO_PATH)
+
+
+@app.context_processor
+def inject_globals():
+    return {
+        "logo_url": url_for("static", filename="logo/mecawings_logo.png") if logo_exists() else None,
+        "logo_missing": not logo_exists(),
+        "logo_path_hint": "static/logo/mecawings_logo.png",
+    }
 
 
 def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
+def _resolve_preset_field(preset_value, custom_value):
+    preset = (preset_value or "").strip()
+    custom = (custom_value or "").strip()
+    if preset == CUSTOM_OPTION:
+        return custom
+    return preset or custom
+
+
+def _preset_form_state(value, options, default=""):
+    value = (value or default).strip()
+    if value in options:
+        return {"preset": value, "custom": ""}
+    if value:
+        return {"preset": CUSTOM_OPTION, "custom": value}
+    return {"preset": default or options[0] if options else "", "custom": ""}
+
+
+def _parse_inspected_areas(form):
+    areas = [a.strip() for a in form.getlist("inspected_areas") if a.strip()]
+    valid = [a for a in areas if a in INSPECTION_AREAS]
+    return valid
+
+
 def normalize_photo_meta(meta):
-    """Normalize photo metadata from form or legacy reports."""
-    severity = meta.get("severity") or meta.get("classification", "Acceptable")
-    if severity not in SEVERITY_LEVELS:
-        severity = "Acceptable"
+    classification = (
+        meta.get("classification")
+        or meta.get("severity")
+        or "Acceptable"
+    )
+    if classification not in CLASSIFICATION_LEVELS:
+        classification = "Acceptable"
 
-    area = meta.get("area", ENGINE_AREAS[0])
-    if area not in ENGINE_AREAS:
-        area = ENGINE_AREAS[0]
+    area = meta.get("area") or INSPECTION_AREAS[0]
+    if area not in INSPECTION_AREAS:
+        pass  # keep legacy/custom photo area labels
 
-    defect = meta.get("defect_description") or meta.get("comment", "")
+    defect_category = meta.get("defect_category", DEFECT_CATEGORIES[0])
+    if defect_category not in DEFECT_CATEGORIES:
+        defect_category = DEFECT_CATEGORIES[0]
+
+    comment = meta.get("comment") or meta.get("defect_description", "")
 
     return {
         "area": area,
-        "defect_description": defect.strip(),
-        "severity": severity,
+        "defect_category": defect_category,
+        "comment": comment.strip(),
+        "classification": classification,
+        "severity": classification,
+        "defect_description": comment.strip(),
     }
 
 
-def save_report(report_id, report_data, photo_entries):
-    """Persist report metadata and generate PDF."""
-    report_dir = os.path.join(REPORTS_FOLDER, report_id)
-    os.makedirs(report_dir, exist_ok=True)
-
-    metadata = {
-        "id": report_id,
-        "created_at": datetime.now().isoformat(),
-        **report_data,
-        "photos": [
-            {
-                "filename": p["filename"],
-                "stored_name": p["stored_name"],
-                "area": p["area"],
-                "defect_description": p["defect_description"],
-                "severity": p["severity"],
-            }
-            for p in photo_entries
-        ],
-    }
-
-    metadata_path = os.path.join(report_dir, "metadata.json")
-    with open(metadata_path, "w", encoding="utf-8") as f:
-        json.dump(metadata, f, ensure_ascii=False, indent=2)
-
-    pdf_photos = [
-        {
-            "path": p["path"],
-            "filename": p["filename"],
-            "area": p["area"],
-            "defect_description": p["defect_description"],
-            "severity": p["severity"],
-        }
-        for p in photo_entries
-    ]
-
-    pdf_path = os.path.join(report_dir, f"borescope_report_{report_id[:8]}.pdf")
-    generate_borescope_report(report_data, pdf_photos, pdf_path, logo_path=LOGO_PATH)
-
-    return pdf_path, metadata
+def _classification_counts(photos):
+    counts = {"Acceptable": 0, "Monitor": 0, "Reject": 0}
+    for photo in photos:
+        cls = photo.get("classification") or photo.get("severity", "Acceptable")
+        if cls in counts:
+            counts[cls] += 1
+    return counts
 
 
-@app.route("/", methods=["GET"])
-def home():
-    today = datetime.now().strftime("%Y-%m-%d")
-    return render_template("index.html", today=today, engine_areas=ENGINE_AREAS)
+def _photos_for_display(photo_entries):
+    return [normalize_photo_meta(p) | {
+        "filename": p.get("filename", ""),
+        "stored_name": p.get("stored_name", ""),
+    } for p in photo_entries]
 
 
-@app.route("/submit", methods=["POST"])
-def submit_report():
-    report_data = {
-        "customer": request.form.get("customer", "").strip(),
-        "aircraft": request.form.get("aircraft", "B737-800").strip(),
-        "registration": request.form.get("registration", "").strip(),
-        "msn": request.form.get("msn", "").strip(),
-        "engine_sn": request.form.get("engine_sn", "").strip(),
-        "engine_position": request.form.get("engine_position", "").strip(),
-        "date": request.form.get("date", "").strip(),
-        "po": request.form.get("po", "").strip(),
-        "inspector": request.form.get("inspector", "").strip(),
-    }
-
-    if not report_data["customer"] or not report_data["engine_sn"]:
-        flash("Customer and Engine S/N are required.", "error")
-        return redirect(url_for("home"))
-
-    photos_meta_raw = request.form.get("photos_meta", "[]")
+def _parse_json_field(raw, default=None):
+    if default is None:
+        default = []
     try:
-        photos_meta = json.loads(photos_meta_raw)
+        return json.loads(raw) if raw else default
     except json.JSONDecodeError:
-        photos_meta = []
+        return default
 
-    uploaded_files = request.files.getlist("photos")
-    if not uploaded_files or all(f.filename == "" for f in uploaded_files):
-        flash("Please upload at least one photo.", "error")
-        return redirect(url_for("home"))
 
-    report_id = str(uuid.uuid4())
-    report_photo_dir = os.path.join(UPLOAD_FOLDER, report_id)
-    os.makedirs(report_photo_dir, exist_ok=True)
+def _build_report_form_context(edit_report=None, edit_folder=None):
+    today = datetime.now().strftime("%Y-%m-%d")
+    report = edit_report or {}
+    aircraft_state = _preset_form_state(report.get("aircraft"), AIRCRAFT_TYPES, "B737-800")
+    engine_state = _preset_form_state(report.get("engine_type"), ENGINE_TYPES, ENGINE_TYPES[0])
 
-    photo_entries = []
-    for i, photo_file in enumerate(uploaded_files):
+    base = {
+        "today": report.get("date") or today,
+        "aircraft_types": AIRCRAFT_TYPES,
+        "engine_type_groups": ENGINE_TYPE_GROUPS,
+        "engine_positions": ENGINE_POSITIONS,
+        "inspection_areas": INSPECTION_AREAS,
+        "defect_categories": DEFECT_CATEGORIES,
+        "aircraft_state": aircraft_state,
+        "engine_state": engine_state,
+        "selected_inspected_areas": report.get("inspected_areas", []),
+        "custom_option": CUSTOM_OPTION,
+    }
+
+    if edit_report:
+        folder = edit_folder or edit_report.get("folder_name", "")
+        has_existing_signature = bool(edit_report.get("has_signature"))
+        existing_signature_url = ""
+        if folder and has_existing_signature:
+            existing_signature_url = url_for(
+                "report_files",
+                folder_name=folder,
+                filename="inspector_signature.png",
+            )
+        return base | {
+            "report_number": edit_report.get("report_number", ""),
+            "edit_mode": True,
+            "source_folder": edit_folder,
+            "report": edit_report,
+            "existing_photos": edit_report.get("photos", []),
+            "has_existing_signature": has_existing_signature,
+            "existing_signature_url": existing_signature_url,
+            "certification_text": CERTIFICATION_TEXT,
+            "active_page": "new",
+        }
+    return base | {
+        "report_number": peek_next_report_number(BASE_DIR),
+        "edit_mode": False,
+        "source_folder": "",
+        "report": None,
+        "existing_photos": [],
+        "has_existing_signature": False,
+        "existing_signature_url": "",
+        "certification_text": CERTIFICATION_TEXT,
+        "active_page": "new",
+    }
+
+
+def _save_photos_to_folder(photos_dir, uploaded_files, photos_meta, start_index=1):
+    os.makedirs(photos_dir, exist_ok=True)
+    entries = []
+    file_index = 0
+
+    for photo_file in uploaded_files:
         if not photo_file or not photo_file.filename:
             continue
         if not allowed_file(photo_file.filename):
             continue
 
         original_name = photo_file.filename
-        safe_name = secure_filename(original_name)
-        if not safe_name:
-            safe_name = f"photo_{i + 1}.jpg"
-
-        unique_name = f"{i + 1:03d}_{safe_name}"
-        save_path = os.path.join(report_photo_dir, unique_name)
+        safe_name = secure_filename(original_name) or f"photo_{start_index + file_index}.jpg"
+        unique_name = f"{start_index + file_index:03d}_{safe_name}"
+        save_path = os.path.join(photos_dir, unique_name)
         photo_file.save(save_path)
 
-        meta = normalize_photo_meta(photos_meta[i] if i < len(photos_meta) else {})
+        meta = normalize_photo_meta(photos_meta[file_index] if file_index < len(photos_meta) else {})
+        entries.append({
+            "filename": original_name,
+            "stored_name": unique_name,
+            "path": save_path,
+            "area": meta["area"],
+            "defect_category": meta["defect_category"],
+            "comment": meta["comment"],
+            "classification": meta["classification"],
+            "severity": meta["classification"],
+            "defect_description": meta["comment"],
+        })
+        file_index += 1
 
-        photo_entries.append(
+    return entries
+
+
+def _merge_existing_photos(existing_meta, photos_dir):
+    entries = []
+    for photo in existing_meta:
+        stored = photo.get("stored_name", "")
+        path = os.path.join(photos_dir, stored)
+        if not os.path.exists(path):
+            continue
+        normalized = normalize_photo_meta(photo)
+        entries.append({
+            "filename": photo.get("filename", stored),
+            "stored_name": stored,
+            "path": path,
+            "area": normalized["area"],
+            "defect_category": normalized["defect_category"],
+            "comment": normalized["comment"],
+            "classification": normalized["classification"],
+            "severity": normalized["classification"],
+            "defect_description": normalized["comment"],
+        })
+    return entries
+
+
+def save_report(folder_name, report_data, photo_entries, signature_path=None, is_update=False):
+    report_dir = get_report_dir(BASE_DIR, folder_name)
+    os.makedirs(report_dir, exist_ok=True)
+
+    now = datetime.now().isoformat()
+    metadata = {
+        "id": report_data["report_number"],
+        "folder_name": folder_name,
+        "report_number": report_data["report_number"],
+        "created_at": report_data.get("created_at") or now,
+        "updated_at": now,
+        "customer": report_data.get("customer"),
+        "aircraft": report_data.get("aircraft"),
+        "engine_type": report_data.get("engine_type"),
+        "registration": report_data.get("registration"),
+        "msn": report_data.get("msn"),
+        "engine_sn": report_data.get("engine_sn"),
+        "engine_position": report_data.get("engine_position"),
+        "inspected_areas": report_data.get("inspected_areas", []),
+        "date": report_data.get("date"),
+        "po": report_data.get("po"),
+        "inspector": report_data.get("inspector"),
+        "has_signature": bool(signature_path and os.path.exists(signature_path)),
+        "photos": [
             {
-                "filename": original_name,
-                "stored_name": unique_name,
-                "path": save_path,
-                "area": meta["area"],
-                "defect_description": meta["defect_description"],
-                "severity": meta["severity"],
+                "filename": p["filename"],
+                "stored_name": p["stored_name"],
+                "area": p["area"],
+                "defect_category": p["defect_category"],
+                "comment": p["comment"],
+                "classification": p["classification"],
+                "severity": p["classification"],
+                "defect_description": p["comment"],
             }
+            for p in photo_entries
+        ],
+    }
+
+    save_metadata(report_dir, metadata)
+
+    pdf_photos = [
+        {
+            "path": p["path"],
+            "filename": p["filename"],
+            "area": p["area"],
+            "defect_category": p["defect_category"],
+            "comment": p["comment"],
+            "classification": p["classification"],
+            "severity": p["classification"],
+            "defect_description": p["comment"],
+        }
+        for p in photo_entries
+        if p.get("path") and os.path.exists(p["path"])
+    ]
+
+    pdf_path = os.path.join(report_dir, pdf_filename_for(report_data["report_number"]))
+    generate_borescope_report(
+        report_data,
+        pdf_photos,
+        pdf_path,
+        logo_path=LOGO_PATH,
+        signature_path=signature_path,
+    )
+
+    return pdf_path, metadata
+
+
+@app.route("/", methods=["GET"])
+def home():
+    return render_template("index.html", **_build_report_form_context())
+
+
+@app.route("/history", methods=["GET"])
+def history():
+    results = search_reports(
+        BASE_DIR,
+        engine_sn=request.args.get("engine_sn", "").strip(),
+        registration=request.args.get("registration", "").strip(),
+        msn=request.args.get("msn", "").strip(),
+        report_number=request.args.get("report_number", "").strip(),
+    )
+
+    for report in results:
+        folder = report.get("folder_name") or report.get("report_number")
+        report_dir = find_report_dir(BASE_DIR, folder)
+        pdf_path = get_pdf_path(report_dir, report.get("report_number", "")) if report_dir else None
+        report["pdf_filename"] = os.path.basename(pdf_path) if pdf_path else None
+        report["folder_name"] = folder
+
+    return render_template(
+        "history.html",
+        results=results,
+        search={
+            "engine_sn": request.args.get("engine_sn", "").strip(),
+            "registration": request.args.get("registration", "").strip(),
+            "msn": request.args.get("msn", "").strip(),
+            "report_number": request.args.get("report_number", "").strip(),
+        },
+        active_page="history",
+    )
+
+
+@app.route("/edit/<folder_name>", methods=["GET"])
+def edit_report(folder_name):
+    report_dir = find_report_dir(BASE_DIR, folder_name)
+    if not report_dir:
+        flash("Report not found.", "error")
+        return redirect(url_for("history"))
+
+    metadata = load_metadata(report_dir)
+    if not metadata:
+        flash("Report data not found.", "error")
+        return redirect(url_for("history"))
+
+    return render_template(
+        "index.html",
+        **_build_report_form_context(edit_report=metadata, edit_folder=metadata.get("folder_name") or folder_name),
+    )
+
+
+@app.route("/submit", methods=["POST"])
+def submit_report():
+    source_folder = request.form.get("source_folder", "").strip()
+    is_edit = bool(source_folder)
+
+    if is_edit:
+        report_dir = find_report_dir(BASE_DIR, source_folder)
+        if not report_dir:
+            flash("Original report not found.", "error")
+            return redirect(url_for("history"))
+        existing_meta = load_metadata(report_dir)
+        report_number = existing_meta.get("report_number")
+        folder_name = existing_meta.get("folder_name") or os.path.basename(report_dir)
+        created_at = existing_meta.get("created_at")
+    else:
+        report_number = allocate_report_number(BASE_DIR)
+        folder_name = None
+        created_at = None
+
+    report_data = {
+        "report_number": report_number,
+        "customer": request.form.get("customer", "").strip(),
+        "aircraft": _resolve_preset_field(
+            request.form.get("aircraft_preset"),
+            request.form.get("aircraft_custom"),
+        ) or "B737-800",
+        "engine_type": _resolve_preset_field(
+            request.form.get("engine_type_preset"),
+            request.form.get("engine_type_custom"),
+        ),
+        "registration": request.form.get("registration", "").strip(),
+        "msn": request.form.get("msn", "").strip(),
+        "engine_sn": request.form.get("engine_sn", "").strip(),
+        "engine_position": request.form.get("engine_position", ENGINE_POSITIONS[0]).strip(),
+        "inspected_areas": _parse_inspected_areas(request.form),
+        "date": request.form.get("date", "").strip(),
+        "po": request.form.get("po", "").strip(),
+        "inspector": request.form.get("inspector", "").strip(),
+        "created_at": created_at or datetime.now().isoformat(),
+    }
+
+    if not report_data["customer"] or not report_data["engine_sn"]:
+        flash("Customer and Engine S/N are required.", "error")
+        return redirect(url_for("home"))
+
+    if not report_data["engine_type"]:
+        flash("Engine type is required.", "error")
+        return redirect(url_for("home"))
+
+    if not report_data["inspector"]:
+        flash("Inspector name is required.", "error")
+        if is_edit:
+            return redirect(url_for("edit_report", folder_name=folder_name))
+        return redirect(url_for("home"))
+
+    if not is_edit:
+        folder_name = build_folder_name(
+            report_number,
+            report_data["registration"],
+            report_data["engine_sn"],
+        )
+
+    report_dir = get_report_dir(BASE_DIR, folder_name)
+    photos_dir = get_photos_dir(report_dir)
+    os.makedirs(photos_dir, exist_ok=True)
+
+    existing_photos_meta = _parse_json_field(request.form.get("existing_photos_meta", "[]"))
+    removed_photos = set(_parse_json_field(request.form.get("removed_photos", "[]")))
+    new_photos_meta = _parse_json_field(request.form.get("photos_meta", "[]"))
+
+    kept_existing = [
+        normalize_photo_meta(p) | {
+            "filename": p.get("filename", p.get("stored_name", "")),
+            "stored_name": p.get("stored_name", ""),
+        }
+        for p in existing_photos_meta
+        if p.get("stored_name") and p.get("stored_name") not in removed_photos
+    ]
+
+    for removed in removed_photos:
+        removed_path = os.path.join(photos_dir, removed)
+        if os.path.exists(removed_path):
+            os.remove(removed_path)
+
+    photo_entries = _merge_existing_photos(kept_existing, photos_dir)
+
+    uploaded_files = request.files.getlist("photos")
+    new_uploads = [f for f in uploaded_files if f and f.filename]
+    if new_uploads:
+        start_index = len(photo_entries) + 1
+        photo_entries.extend(
+            _save_photos_to_folder(photos_dir, new_uploads, new_photos_meta, start_index=start_index)
         )
 
     if not photo_entries:
-        flash("No valid photos were uploaded.", "error")
+        flash("Please keep or upload at least one photo.", "error")
+        if is_edit:
+            return redirect(url_for("edit_report", folder_name=folder_name))
         return redirect(url_for("home"))
 
-    pdf_path, metadata = save_report(report_id, report_data, photo_entries)
-    pdf_filename = os.path.basename(pdf_path)
+    signature_data = request.form.get("inspector_signature", "")
+    signature_path = os.path.join(report_dir, "inspector_signature.png")
+    had_existing_signature = is_edit and os.path.exists(signature_path)
+
+    if signature_data.strip():
+        save_signature_data_url(signature_data, signature_path)
+    elif not had_existing_signature:
+        flash("Inspector signature is required.", "error")
+        if is_edit:
+            return redirect(url_for("edit_report", folder_name=folder_name))
+        return redirect(url_for("home"))
+
+    effective_signature_path = signature_path if os.path.exists(signature_path) else None
+
+    pdf_path, metadata = save_report(
+        folder_name,
+        report_data,
+        photo_entries,
+        signature_path=effective_signature_path,
+        is_update=is_edit,
+    )
+
+    display_photos = _photos_for_display(photo_entries)
 
     return render_template(
         "success.html",
         report=report_data,
-        report_id=report_id,
-        photos=photo_entries,
-        pdf_filename=pdf_filename,
+        report_number=report_number,
+        folder_name=folder_name,
+        photos=display_photos,
+        pdf_filename=os.path.basename(pdf_path),
         photo_count=len(photo_entries),
+        classification_counts=_classification_counts(display_photos),
+        has_signature=metadata.get("has_signature", False),
+        signature_url=url_for(
+            "report_files",
+            folder_name=folder_name,
+            filename="inspector_signature.png",
+        ) if metadata.get("has_signature") else "",
+        active_page="new",
+        updated=is_edit,
     )
 
 
-@app.route("/download/<report_id>/<filename>")
-def download_pdf(report_id, filename):
-    safe_report = os.path.basename(report_id)
-    safe_file = os.path.basename(filename)
-    full_dir = os.path.join(REPORTS_FOLDER, safe_report)
+@app.route("/download/<report_key>/<filename>")
+def download_pdf(report_key, filename):
+    report_dir = find_report_dir(BASE_DIR, report_key)
+    if not report_dir:
+        abort(404)
+    return send_from_directory(report_dir, os.path.basename(filename), as_attachment=True)
 
-    if not os.path.isdir(full_dir):
+
+@app.route("/report-files/<folder_name>/<path:filename>")
+def report_files(folder_name, filename):
+    report_dir = find_report_dir(BASE_DIR, folder_name)
+    if not report_dir:
+        abort(404)
+    safe = os.path.normpath(filename)
+    if safe.startswith(".."):
+        abort(404)
+    return send_from_directory(report_dir, safe)
+
+
+@app.route("/view/<report_key>")
+def view_report(report_key):
+    report_dir = find_report_dir(BASE_DIR, report_key)
+    if not report_dir:
         abort(404)
 
-    return send_from_directory(full_dir, safe_file, as_attachment=True)
+    metadata = load_metadata(report_dir)
+    pdf_path = get_pdf_path(report_dir, metadata.get("report_number", ""))
+    folder_name = metadata.get("folder_name") or os.path.basename(report_dir)
 
-
-@app.route("/view/<report_id>")
-def view_report(report_id):
-    report_dir = os.path.join(REPORTS_FOLDER, report_id)
-    metadata_path = os.path.join(report_dir, "metadata.json")
-
-    if not os.path.exists(metadata_path):
-        abort(404)
-
-    with open(metadata_path, encoding="utf-8") as f:
-        metadata = json.load(f)
-
-    pdf_files = [f for f in os.listdir(report_dir) if f.endswith(".pdf")]
-    pdf_filename = pdf_files[0] if pdf_files else None
-
-    photos = []
-    for p in metadata.get("photos", []):
-        photos.append(normalize_photo_meta(p) | {
-            "filename": p.get("filename", ""),
-            "stored_name": p.get("stored_name", ""),
-        })
+    photos = _photos_for_display(metadata.get("photos", []))
 
     return render_template(
         "success.html",
         report=metadata,
-        report_id=report_id,
+        report_number=metadata.get("report_number"),
+        folder_name=folder_name,
         photos=photos,
-        pdf_filename=pdf_filename,
+        pdf_filename=os.path.basename(pdf_path) if pdf_path else None,
         photo_count=len(photos),
+        classification_counts=_classification_counts(photos),
+        has_signature=metadata.get("has_signature", False),
+        signature_url=url_for(
+            "report_files",
+            folder_name=folder_name,
+            filename="inspector_signature.png",
+        ) if metadata.get("has_signature") else "",
+        active_page="new",
+        updated=False,
     )
 
 

@@ -15,18 +15,36 @@
     <header class="site-header">
         <div class="header-inner">
             <a href="{{ url_for('home') }}" class="brand">
-                <img src="{{ url_for('static', filename='img/logo.svg') }}" alt="Mecawings" class="brand-logo">
+                {% if logo_url %}
+                <img src="{{ logo_url }}" alt="Mecawings" class="brand-logo">
+                {% else %}
+                <div class="brand-logo-placeholder" title="Place logo at {{ logo_path_hint }}">
+                    <span>MW</span>
+                </div>
+                {% endif %}
                 <div class="brand-text">
                     <span class="brand-name">Mecawings</span>
-                    <span class="brand-tagline">CFM56 Borescope Inspection</span>
+                    <span class="brand-tagline">Aircraft Engine Borescope Inspection</span>
                 </div>
             </a>
+
+            <nav class="main-nav" aria-label="Main navigation">
+                <a href="{{ url_for('home') }}" class="nav-link{% if active_page == 'new' %} nav-link-active{% endif %}">New Report</a>
+                <a href="{{ url_for('history') }}" class="nav-link{% if active_page == 'history' %} nav-link-active{% endif %}">Report History</a>
+            </nav>
+
             <div class="header-badge">
                 <span class="badge-dot"></span>
                 Report System
             </div>
         </div>
     </header>
+
+    {% if logo_missing %}
+    <div class="logo-notice">
+        <strong>Logo missing.</strong> Place your Mecawings logo at <code>{{ logo_path_hint }}</code>
+    </div>
+    {% endif %}
 
     <main class="main-content">
         {% with messages = get_flashed_messages(with_categories=true) %}

@@ -17,11 +17,12 @@ from reportlab.platypus import (
     TableStyle,
 )
 from reportlab.platypus.tableofcontents import TableOfContents
+from constants import CERTIFICATION_TEXT, REPORT_SUBTITLE, REPORT_TITLE
 
 SEVERITY_COLORS = {
-    "Acceptable": colors.HexColor("#16A34A"),
-    "Monitor": colors.HexColor("#D97706"),
-    "Reject": colors.HexColor("#DC2626"),
+    "Acceptable": colors.HexColor("#16A34A"),  # Green
+    "Monitor": colors.HexColor("#EA580C"),     # Orange
+    "Reject": colors.HexColor("#DC2626"),       # Red
 }
 
 SEVERITY_LABELS = {
@@ -34,36 +35,44 @@ BRAND_PRIMARY = colors.HexColor("#0B3D6B")
 BRAND_ACCENT = colors.HexColor("#00A676")
 
 
-def _ensure_logo_png(logo_path):
-    """Return a PNG logo path usable by ReportLab (SVG is not supported)."""
-    if logo_path and logo_path.endswith(".png") and os.path.exists(logo_path):
+def _resolve_logo(logo_path):
+    """Return logo path for PDF or None if missing (placeholder used instead)."""
+    if logo_path and os.path.exists(logo_path):
         return logo_path
-
-    png_path = logo_path.replace(".svg", ".png") if logo_path else "logo.png"
-    if os.path.exists(png_path):
-        return png_path
-
-    img = Image.new("RGB", (400, 80), color=(11, 61, 107))
-    draw = ImageDraw.Draw(img)
-    try:
-        font_lg = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 28)
-        font_sm = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 14)
-    except OSError:
-        font_lg = ImageFont.load_default()
-        font_sm = ImageFont.load_default()
-
-    draw.text((16, 14), "MECAWINGS", fill=(255, 255, 255), font=font_lg)
-    draw.text((16, 50), "AEROSPACE MRO", fill=(0, 166, 118), font=font_sm)
-    draw.rectangle([(320, 20), (380, 60)], outline=(0, 166, 118), width=2)
-    draw.polygon([(350, 28), (340, 52), (360, 52)], fill=(0, 166, 118))
-
-    os.makedirs(os.path.dirname(png_path) or ".", exist_ok=True)
-    img.save(png_path, "PNG")
-    return png_path
+    return None
 
 
-def _prepare_image(path, max_width=14 * cm, max_height=7.5 * cm):
-    """Resize image for PDF while preserving aspect ratio."""
+def _logo_flowable(logo_path, sty, width=3.5 * cm, height=1.2 * cm):
+    """Build logo image or placeholder for PDF header."""
+    resolved = _resolve_logo(logo_path)
+    if resolved:
+        try:
+            return RLImage(resolved, width=width, height=height, kind="proportional")
+        except Exception:
+            pass
+
+    placeholder = Table(
+        [[Paragraph('<font color="#0B3D6B" size="9"><b>MECAWINGS LOGO</b></font>', sty["body"])]],
+        colWidths=[width],
+        rowHeights=[height * 0.7],
+    )
+    placeholder.setStyle(
+        TableStyle([
+            ("BOX", (0, 0), (-1, -1), 1, colors.HexColor("#CBD5E1")),
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F8FAFC")),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ])
+    )
+    note = Paragraph(
+        '<font size="6" color="#9CA3AF">Place logo at static/logo/mecawings_logo.png</font>',
+        ParagraphStyle("LogoNote", alignment=TA_CENTER, fontSize=6),
+    )
+    return Table([[placeholder], [note]], colWidths=[width])
+
+
+def _prepare_image(path, max_width=16.5 * cm, max_height=18 * cm):
+    """Resize image for PDF — large display for one-page-per-photo layout."""
     with Image.open(path) as img:
         img = img.convert("RGB")
         w, h = img.size
@@ -77,34 +86,70 @@ def _prepare_image(path, max_width=14 * cm, max_height=7.5 * cm):
         return path, w, h
 
 
-def _severity_counts(photos):
-    counts = {"Acceptable": 0, "Monitor": 0, "Reject": 0}
-    for photo in photos:
-        sev = photo.get("severity") or photo.get("classification", "Acceptable")
-        if sev in counts:
-            counts[sev] += 1
-    return counts
+def _get_classification(photo):
+    return photo.get("classification") or photo.get("severity", "Acceptable")
 
 
 def _get_severity(photo):
-    return photo.get("severity") or photo.get("classification", "Acceptable")
+    return _get_classification(photo)
+
+
+def _get_comment(photo):
+    return (photo.get("comment") or photo.get("defect_description", "")).strip()
 
 
 def _get_defect(photo):
-    return (photo.get("defect_description") or photo.get("comment", "")).strip()
+    return _get_comment(photo)
+
+
+def _get_defect_category(photo):
+    return photo.get("defect_category", "—")
 
 
 def _get_area(photo):
     return photo.get("area", "—")
 
 
+def _severity_counts(photos):
+    counts = {"Acceptable": 0, "Monitor": 0, "Reject": 0}
+    for photo in photos:
+        cls = _get_classification(photo)
+        if cls in counts:
+            counts[cls] += 1
+    return counts
+
+
 class BorescopeDocTemplate(SimpleDocTemplate):
-    """Document template that registers TOC entries."""
+    """Document template that registers TOC entries and draws page footers."""
+
+    def __init__(self, *args, report_number=None, **kwargs):
+        self.report_number = report_number
+        super().__init__(*args, **kwargs)
 
     def afterFlowable(self, flowable):
         if isinstance(flowable, Paragraph) and hasattr(flowable, "toc_level"):
             text = flowable.getPlainText()
             self.notify("TOCEntry", (flowable.toc_level, text, self.page))
+
+
+def _draw_page_footer(canvas, doc, report_number=None):
+    canvas.saveState()
+    canvas.setFont("Helvetica", 7)
+    canvas.setFillColor(colors.HexColor("#9CA3AF"))
+    left = doc.leftMargin
+    right = doc.pagesize[0] - doc.rightMargin
+    y = 0.9 * cm
+    if report_number:
+        canvas.drawString(left, y, f"Report No. {report_number}")
+    canvas.drawRightString(right, y, f"Page {doc.page}")
+    canvas.restoreState()
+
+
+def _page_callbacks(report_number):
+    def on_page(canvas, doc):
+        _draw_page_footer(canvas, doc, report_number)
+
+    return on_page, on_page
 
 
 def _build_styles():
@@ -166,19 +211,19 @@ def _toc_paragraph(text, level=0):
     return p
 
 
-def _header_block(logo_path, sty):
-    cells = []
-    resolved_logo = _ensure_logo_png(logo_path) if logo_path else None
-    if resolved_logo and os.path.exists(resolved_logo):
-        cells.append(RLImage(resolved_logo, width=3.5 * cm, height=1.2 * cm, kind="proportional"))
-    else:
-        cells.append(Paragraph('<font color="#0B3D6B" size="14"><b>MECAWINGS</b></font>', sty["body"]))
+def _header_block(logo_path, sty, report_number=None):
+    cells = [_logo_flowable(logo_path, sty)]
 
-    cells.append(
-        Paragraph(
-            f'<font size="8" color="#6B7280">Report generated: {datetime.now().strftime("%d %b %Y %H:%M")}</font>',
-            ParagraphStyle("HeaderDate", alignment=TA_RIGHT, fontSize=8),
+    header_lines = []
+    if report_number:
+        header_lines.append(
+            f'<font size="10" color="#0B3D6B"><b>Report No. {report_number}</b></font>'
         )
+    header_lines.append(
+        f'<font size="8" color="#6B7280">Generated: {datetime.now().strftime("%d %b %Y %H:%M")}</font>'
+    )
+    cells.append(
+        Paragraph("<br/>".join(header_lines), ParagraphStyle("HeaderDate", alignment=TA_RIGHT, fontSize=8))
     )
 
     table = Table([cells], colWidths=[10 * cm, 7 * cm])
@@ -193,14 +238,21 @@ def _header_block(logo_path, sty):
 
 
 def _info_table(report_data, sty):
+    inspected = report_data.get("inspected_areas") or []
+    inspected_text = ", ".join(inspected) if inspected else "—"
+    inspected_cell = Paragraph(
+        inspected_text,
+        ParagraphStyle("InfoInspected", fontSize=8, leading=10),
+    )
+
     info_data = [
-        ["Customer", report_data.get("customer", "—"), "Aircraft Type", report_data.get("aircraft", "—")],
+        ["Report Number", report_data.get("report_number", "—"), "Customer", report_data.get("customer", "—")],
+        ["Aircraft Type", report_data.get("aircraft", "—"), "Engine Type", report_data.get("engine_type", "—")],
         ["Registration", report_data.get("registration", "—"), "MSN", report_data.get("msn", "—")],
         ["Engine S/N", report_data.get("engine_sn", "—"), "Engine Position", report_data.get("engine_position", "—")],
         ["Inspection Date", report_data.get("date", "—"), "P/O Reference", report_data.get("po", "—")],
+        ["Inspector", report_data.get("inspector", "—"), "Inspected Areas", inspected_cell],
     ]
-    if report_data.get("inspector"):
-        info_data.append(["Inspector", report_data.get("inspector", "—"), "", ""])
 
     table = Table(info_data, colWidths=[3.5 * cm, 5 * cm, 3.5 * cm, 5 * cm])
     table.setStyle(
@@ -242,21 +294,66 @@ def _severity_summary_table(counts, total, sty):
     return table
 
 
+def _summary_page(counts, total, sty):
+    """Dedicated inspection summary page."""
+    story = []
+    story.append(_toc_paragraph("Inspection Summary", level=0))
+    story.append(Spacer(1, 0.4 * cm))
+    story.append(Paragraph(
+        "Overview of all borescope findings documented in this report.",
+        sty["body"],
+    ))
+    story.append(Spacer(1, 0.5 * cm))
+
+    summary_data = [[
+        Paragraph('<font size="11"><b>Total Photos</b></font>', sty["body"]),
+        Paragraph('<font size="11" color="#16A34A"><b>Acceptable</b></font>', sty["body"]),
+        Paragraph('<font size="11" color="#EA580C"><b>Monitor</b></font>', sty["body"]),
+        Paragraph('<font size="11" color="#DC2626"><b>Reject</b></font>', sty["body"]),
+    ], [
+        Paragraph(f'<font size="20"><b>{total}</b></font>', sty["body"]),
+        Paragraph(f'<font size="20" color="#16A34A"><b>{counts["Acceptable"]}</b></font>', sty["body"]),
+        Paragraph(f'<font size="20" color="#EA580C"><b>{counts["Monitor"]}</b></font>', sty["body"]),
+        Paragraph(f'<font size="20" color="#DC2626"><b>{counts["Reject"]}</b></font>', sty["body"]),
+    ]]
+    summary_table = Table(summary_data, colWidths=[4.25 * cm, 4.25 * cm, 4.25 * cm, 4.25 * cm])
+    summary_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E8F0F8")),
+        ("BOX", (0, 0), (-1, -1), 1, colors.HexColor("#CBD5E1")),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 12),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 12),
+    ]))
+    story.append(summary_table)
+    story.append(Spacer(1, 0.6 * cm))
+
+    legend = (
+        "<b>Classification legend:</b> "
+        '<font color="#16A34A">Green = Acceptable</font> — within limits; '
+        '<font color="#EA580C">Orange = Monitor</font> — requires follow-up; '
+        '<font color="#DC2626">Red = Reject</font> — exceeds acceptable limits.'
+    )
+    story.append(Paragraph(legend, sty["body"]))
+    return story
+
+
 def _findings_summary_table(photos, sty):
-    header = ["Photo #", "Area Inspected", "Defect Description", "Severity"]
+    header = ["#", "Area", "Defect Category", "Comment", "Classification"]
     rows = [header]
     for idx, photo in enumerate(photos, start=1):
-        severity = _get_severity(photo)
-        color = SEVERITY_COLORS.get(severity, colors.grey).hexval()
-        defect = _get_defect(photo) or "—"
+        classification = _get_classification(photo)
+        color = SEVERITY_COLORS.get(classification, colors.grey).hexval()
+        comment = _get_comment(photo) or "—"
         rows.append([
             str(idx),
             _get_area(photo),
-            defect[:80] + ("…" if len(defect) > 80 else ""),
-            Paragraph(f'<font color="{color}"><b>{severity.upper()}</b></font>', sty["body"]),
+            _get_defect_category(photo),
+            comment[:60] + ("…" if len(comment) > 60 else ""),
+            Paragraph(f'<font color="{color}"><b>{classification.upper()}</b></font>', sty["body"]),
         ])
 
-    table = Table(rows, colWidths=[1.5 * cm, 3.5 * cm, 8 * cm, 3.5 * cm], repeatRows=1)
+    table = Table(rows, colWidths=[1 * cm, 3 * cm, 3.5 * cm, 6 * cm, 3 * cm], repeatRows=1)
     table.setStyle(
         TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), BRAND_PRIMARY),
@@ -274,52 +371,75 @@ def _findings_summary_table(photos, sty):
     return table
 
 
-def _signature_block(sty):
+def _signature_flowable(signature_path):
+    line_style = ParagraphStyle("SigLine", fontSize=9, textColor=colors.HexColor("#1F2937"))
+    if signature_path and os.path.exists(signature_path):
+        try:
+            return RLImage(signature_path, width=7 * cm, height=2.5 * cm, kind="proportional")
+        except Exception:
+            pass
+    return Paragraph("_" * 52, line_style)
+
+
+def _signature_block(sty, signature_path=None, inspector_name=None, report_date=None):
     story = []
     story.append(Spacer(1, 0.5 * cm))
-    story.append(_toc_paragraph("Signatures", level=0))
+    story.append(_toc_paragraph("Certification", level=0))
     story.append(Spacer(1, 0.3 * cm))
 
-    cert = (
-        "This borescope inspection report documents visual findings observed during the "
-        "CFM56 engine inspection performed by Mecawings. Severity classifications follow "
-        "standard MRO guidelines: <b>Acceptable</b> — within limits; "
-        "<b>Monitor</b> — requires follow-up inspection; "
-        "<b>Reject</b> — exceeds acceptable limits."
+    cert_box = Table(
+        [[Paragraph(CERTIFICATION_TEXT, sty["body"])]],
+        colWidths=[17 * cm],
     )
-    story.append(Paragraph(cert, sty["body"]))
-    story.append(Spacer(1, 1 * cm))
-
-    sig_table = Table(
-        [
-            ["_" * 38, "_" * 38],
-            ["Inspector Signature", "Customer Signature"],
-            ["", ""],
-            ["_" * 38, "_" * 38],
-            ["Print Name / Date", "Print Name / Date"],
-        ],
-        colWidths=[8.25 * cm, 8.25 * cm],
-    )
-    sig_table.setStyle(
+    cert_box.setStyle(
         TableStyle([
-            ("FONTSIZE", (0, 0), (-1, -1), 9),
-            ("TEXTCOLOR", (0, 1), (-1, 1), colors.HexColor("#374151")),
-            ("TEXTCOLOR", (0, 4), (-1, 4), colors.HexColor("#6B7280")),
-            ("FONTNAME", (0, 1), (-1, 1), "Helvetica-Bold"),
-            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-            ("TOPPADDING", (0, 1), (-1, 1), 6),
-            ("TOPPADDING", (0, 4), (-1, 4), 6),
-            ("BOTTOMPADDING", (0, 2), (-1, 2), 12),
-            ("LINEBELOW", (0, 0), (0, 0), 0.5, colors.HexColor("#CBD5E1")),
-            ("LINEBELOW", (1, 0), (1, 0), 0.5, colors.HexColor("#CBD5E1")),
-            ("LINEBELOW", (0, 3), (0, 3), 0.5, colors.HexColor("#CBD5E1")),
-            ("LINEBELOW", (1, 3), (1, 3), 0.5, colors.HexColor("#CBD5E1")),
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F8FAFC")),
+            ("BOX", (0, 0), (-1, -1), 0.75, BRAND_PRIMARY),
+            ("TOPPADDING", (0, 0), (-1, -1), 10),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+            ("LEFTPADDING", (0, 0), (-1, -1), 10),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 10),
         ])
     )
-    story.append(sig_table)
+    story.append(cert_box)
+    story.append(Spacer(1, 0.6 * cm))
+
+    signature_cell = _signature_flowable(signature_path)
+    cert_details = Table(
+        [
+            [
+                Paragraph("<b>Inspector Name</b>", sty["body"]),
+                Paragraph(inspector_name or "—", sty["body"]),
+            ],
+            [
+                Paragraph("<b>Signature</b>", sty["body"]),
+                signature_cell,
+            ],
+            [
+                Paragraph("<b>Date</b>", sty["body"]),
+                Paragraph(report_date or "—", sty["body"]),
+            ],
+        ],
+        colWidths=[4.5 * cm, 12.5 * cm],
+    )
+    cert_details.setStyle(
+        TableStyle([
+            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#E8F0F8")),
+            ("TEXTCOLOR", (0, 0), (0, -1), BRAND_PRIMARY),
+            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("ALIGN", (1, 1), (1, 1), "LEFT"),
+        ])
+    )
+    story.append(cert_details)
 
     footer = Paragraph(
-        '<font size="7" color="#9CA3AF">Mecawings — CFM56 Borescope Inspection Report — Confidential</font>',
+        '<font size="7" color="#9CA3AF">Mecawings — Aircraft Engine Borescope Inspection Report — Confidential</font>',
         ParagraphStyle("Footer", alignment=TA_CENTER, fontSize=7),
     )
     story.append(Spacer(1, 1 * cm))
@@ -327,12 +447,12 @@ def _signature_block(sty):
     return story
 
 
-def generate_borescope_report(report_data, photos, output_path, logo_path=None):
+def generate_borescope_report(report_data, photos, output_path, logo_path=None, signature_path=None):
     """
-    Generate a professional CFM56 borescope inspection PDF report.
+    Generate a professional aircraft engine borescope inspection PDF report.
 
-    report_data: customer, aircraft, registration, msn, engine_sn,
-                 engine_position, date, po, inspector
+    report_data: report_number, customer, aircraft, engine_type, registration, msn,
+                 engine_sn, engine_position, inspected_areas, date, po, inspector
     photos: path, filename, area, defect_description, severity
     """
     sty = _build_styles()
@@ -345,7 +465,8 @@ def generate_borescope_report(report_data, photos, output_path, logo_path=None):
         rightMargin=1.5 * cm,
         leftMargin=1.5 * cm,
         topMargin=1.5 * cm,
-        bottomMargin=1.5 * cm,
+        bottomMargin=2 * cm,
+        report_number=report_data.get("report_number"),
     )
 
     toc = TableOfContents()
@@ -371,14 +492,11 @@ def generate_borescope_report(report_data, photos, output_path, logo_path=None):
     story = []
 
     # Cover / title page
-    story.append(_header_block(logo_path, sty))
+    story.append(_header_block(logo_path, sty, report_data.get("report_number")))
     story.append(Spacer(1, 0.4 * cm))
-    story.append(Paragraph("BORESCOPE INSPECTION REPORT", sty["title"]))
-    story.append(Paragraph("CFM56 Engine — Mecawings Visual Inspection Findings", sty["subtitle"]))
+    story.append(Paragraph(REPORT_TITLE.upper(), sty["title"]))
+    story.append(Paragraph(REPORT_SUBTITLE, sty["subtitle"]))
     story.append(_info_table(report_data, sty))
-    story.append(Spacer(1, 0.5 * cm))
-    story.append(_severity_summary_table(counts, len(photos), sty))
-
     story.append(PageBreak())
 
     # Table of contents
@@ -387,66 +505,60 @@ def generate_borescope_report(report_data, photos, output_path, logo_path=None):
     story.append(toc)
     story.append(PageBreak())
 
-    # Findings summary section
-    story.append(_toc_paragraph("Findings Summary", level=0))
-    story.append(Spacer(1, 0.2 * cm))
-    story.append(Paragraph(
-        f"Total findings documented: <b>{len(photos)}</b> — "
-        f"Acceptable: <b>{counts['Acceptable']}</b>, "
-        f"Monitor: <b>{counts['Monitor']}</b>, "
-        f"Reject: <b>{counts['Reject']}</b>",
-        sty["body"],
-    ))
-    story.append(Spacer(1, 0.3 * cm))
+    # Dedicated summary page
+    story.extend(_summary_page(counts, len(photos), sty))
+    story.append(Spacer(1, 0.4 * cm))
     story.append(_findings_summary_table(photos, sty))
     story.append(PageBreak())
 
-    # Detailed photo findings
+    # Detailed photo findings — one page per photo
     story.append(_toc_paragraph("Detailed Photo Findings", level=0))
-    story.append(Spacer(1, 0.3 * cm))
 
     for idx, photo in enumerate(photos, start=1):
-        severity = _get_severity(photo)
-        sev_color = SEVERITY_COLORS.get(severity, colors.grey)
-        sev_label = SEVERITY_LABELS.get(severity, severity.upper())
+        if idx > 1:
+            story.append(PageBreak())
+
+        classification = _get_classification(photo)
+        cls_color = SEVERITY_COLORS.get(classification, colors.grey)
+        cls_label = SEVERITY_LABELS.get(classification, classification.upper())
         area = _get_area(photo)
-        defect = _get_defect(photo) or "No defect description provided."
+        category = _get_defect_category(photo)
+        comment = _get_comment(photo) or "No comment provided."
 
         story.append(_toc_paragraph(f"Photo {idx} — {area}", level=1))
+        story.append(Spacer(1, 0.2 * cm))
 
-        header = Table(
-            [[
-                Paragraph(f"<b>Photo {idx:02d}</b> — {photo.get('filename', '')}", sty["body"]),
-                Paragraph(f'<font color="{sev_color.hexval()}"><b>{sev_label}</b></font>',
-                          ParagraphStyle("Sev", alignment=TA_CENTER, fontSize=9)),
-            ]],
-            colWidths=[12 * cm, 5 * cm],
+        # Classification banner with color
+        banner = Table(
+            [[Paragraph(
+                f'<font color="white"><b>Photo {idx:02d} — {cls_label}</b></font>',
+                ParagraphStyle("Banner", alignment=TA_CENTER, fontSize=11, fontName="Helvetica-Bold"),
+            )]],
+            colWidths=[17 * cm],
         )
-        header.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F1F5F9")),
-            ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("TOPPADDING", (0, 0), (-1, -1), 5),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-            ("LEFTPADDING", (0, 0), (0, 0), 6),
+        banner.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), cls_color),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
         ]))
-        story.append(header)
+        story.append(banner)
 
         meta_row = Table(
             [[
-                Paragraph(f"<b>Area Inspected:</b> {area}", sty["body"]),
-                Paragraph(f"<b>Severity:</b> {severity}", sty["body"]),
+                Paragraph(f"<b>Area:</b> {area}", sty["body"]),
+                Paragraph(f"<b>Defect Category:</b> {category}", sty["body"]),
             ]],
-            colWidths=[10 * cm, 7 * cm],
+            colWidths=[8.5 * cm, 8.5 * cm],
         )
         meta_row.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#E8F0F8")),
             ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
-            ("TOPPADDING", (0, 0), (-1, -1), 4),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
         ]))
         story.append(meta_row)
+        story.append(Spacer(1, 0.25 * cm))
 
         img_path = photo.get("path")
         if img_path and os.path.exists(img_path):
@@ -458,6 +570,7 @@ def generate_borescope_report(report_data, photos, output_path, logo_path=None):
                 img_table = Table([[rl_img]], colWidths=[17 * cm])
                 img_table.setStyle(TableStyle([
                     ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                     ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#E2E8F0")),
                     ("TOPPADDING", (0, 0), (-1, -1), 4),
                     ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
@@ -465,28 +578,33 @@ def generate_borescope_report(report_data, photos, output_path, logo_path=None):
                 story.append(img_table)
             except Exception:
                 story.append(Paragraph("<i>Image could not be loaded</i>", sty["small"]))
+        else:
+            story.append(Paragraph("<i>Image not available</i>", sty["small"]))
 
-        defect_box = Table(
-            [[Paragraph(f"<b>Defect Description:</b> {defect}", sty["body"])]],
+        story.append(Spacer(1, 0.3 * cm))
+        comment_box = Table(
+            [[Paragraph(f"<b>Comment:</b> {comment}", sty["body"])]],
             colWidths=[17 * cm],
         )
-        defect_box.setStyle(TableStyle([
+        comment_box.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, -1), colors.white),
             ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#E2E8F0")),
-            ("TOPPADDING", (0, 0), (-1, -1), 6),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
         ]))
-        story.append(defect_box)
-        story.append(Spacer(1, 0.4 * cm))
-
-        if idx < len(photos):
-            story.append(PageBreak())
+        story.append(comment_box)
 
     story.append(PageBreak())
-    story.extend(_signature_block(sty))
+    story.extend(_signature_block(
+        sty,
+        signature_path=signature_path,
+        inspector_name=report_data.get("inspector"),
+        report_date=report_data.get("date"),
+    ))
 
-    doc.multiBuild(story)
+    on_first, on_later = _page_callbacks(report_data.get("report_number"))
+    doc.multiBuild(story, onFirstPage=on_first, onLaterPages=on_later)
 
     for temp in temp_files:
         try:

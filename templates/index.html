@@ -1,14 +1,27 @@
 {% extends "base.html" %}
 
-{% block title %}New Report{% endblock %}
+{% block title %}{% if edit_mode %}Edit Report{% else %}New Report{% endif %}{% endblock %}
 
 {% block content %}
 <section class="page-hero">
-    <h1>Borescope Inspection Report</h1>
-    <p class="hero-subtitle">CFM56 Engine — Document findings by engine area with photos, defect descriptions and severity</p>
+    <div class="report-number-banner">
+        <span class="report-number-label">Report Number</span>
+        <span class="report-number-value">{{ report_number }}</span>
+        {% if not edit_mode %}
+        <span class="report-number-hint">Assigned automatically on submit</span>
+        {% endif %}
+        {% if edit_mode %}
+        <span class="edit-mode-badge">Editing</span>
+        {% endif %}
+    </div>
+    <h1>{% if edit_mode %}Edit Borescope Report{% else %}Aircraft Engine Borescope Inspection Report{% endif %}</h1>
+    <p class="hero-subtitle">Document findings by inspection area with photos, defect categories, comments and classification</p>
 </section>
 
 <form id="report-form" action="{{ url_for('submit_report') }}" method="POST" enctype="multipart/form-data" class="report-form">
+    <input type="hidden" id="source_folder" name="source_folder" value="{{ source_folder or '' }}">
+    <input type="hidden" id="existing_photos_meta" name="existing_photos_meta" value="[]">
+    <input type="hidden" id="removed_photos" name="removed_photos" value="[]">
 
     <section class="card">
         <div class="card-header">
@@ -18,46 +31,87 @@
         <div class="form-grid">
             <div class="form-group">
                 <label for="customer">Customer <span class="required">*</span></label>
-                <input type="text" id="customer" name="customer" required placeholder="Airline / Operator name">
+                <input type="text" id="customer" name="customer" required placeholder="Airline / Operator name"
+                    value="{{ report.customer if report else '' }}">
             </div>
             <div class="form-group">
-                <label for="aircraft">Aircraft Type</label>
-                <input type="text" id="aircraft" name="aircraft" value="B737-800" placeholder="B737-800">
+                <label for="aircraft_preset">Aircraft Type</label>
+                <select id="aircraft_preset" name="aircraft_preset">
+                    {% for ac in aircraft_types %}
+                    <option value="{{ ac }}"{% if aircraft_state.preset == ac %} selected{% endif %}>{{ ac }}</option>
+                    {% endfor %}
+                    <option value="{{ custom_option }}"{% if aircraft_state.preset == custom_option %} selected{% endif %}>Other (custom)</option>
+                </select>
+            </div>
+            <div class="form-group" id="aircraft-custom-wrap"{% if aircraft_state.preset != custom_option %} hidden{% endif %}>
+                <label for="aircraft_custom">Custom Aircraft Type</label>
+                <input type="text" id="aircraft_custom" name="aircraft_custom" placeholder="Enter aircraft type"
+                    value="{{ aircraft_state.custom }}">
+            </div>
+            <div class="form-group">
+                <label for="engine_type_preset">Engine Type <span class="required">*</span></label>
+                <select id="engine_type_preset" name="engine_type_preset" required>
+                    {% for group, engines in engine_type_groups.items() %}
+                    <optgroup label="{{ group }}">
+                        {% for eng in engines %}
+                        <option value="{{ eng }}"{% if engine_state.preset == eng %} selected{% endif %}>{{ eng }}</option>
+                        {% endfor %}
+                    </optgroup>
+                    {% endfor %}
+                    <option value="{{ custom_option }}"{% if engine_state.preset == custom_option %} selected{% endif %}>Other (custom)</option>
+                </select>
+            </div>
+            <div class="form-group" id="engine-type-custom-wrap"{% if engine_state.preset != custom_option %} hidden{% endif %}>
+                <label for="engine_type_custom">Custom Engine Type</label>
+                <input type="text" id="engine_type_custom" name="engine_type_custom" placeholder="Enter engine type"
+                    value="{{ engine_state.custom }}">
             </div>
             <div class="form-group">
                 <label for="registration">Registration</label>
-                <input type="text" id="registration" name="registration" placeholder="F-XXXX">
+                <input type="text" id="registration" name="registration" placeholder="F-XXXX"
+                    value="{{ report.registration if report else '' }}">
             </div>
             <div class="form-group">
                 <label for="msn">MSN</label>
-                <input type="text" id="msn" name="msn" placeholder="MSN number">
+                <input type="text" id="msn" name="msn" placeholder="MSN number"
+                    value="{{ report.msn if report else '' }}">
             </div>
             <div class="form-group">
                 <label for="engine_sn">Engine S/N <span class="required">*</span></label>
-                <input type="text" id="engine_sn" name="engine_sn" required placeholder="CFM56-7B26 S/N">
+                <input type="text" id="engine_sn" name="engine_sn" required placeholder="Engine serial number"
+                    value="{{ report.engine_sn if report else '' }}">
             </div>
             <div class="form-group">
                 <label for="engine_position">Engine Position</label>
                 <select id="engine_position" name="engine_position">
-                    <option value="LH">Left Hand (LH)</option>
-                    <option value="RH">Right Hand (RH)</option>
-                    <option value="#1">#1</option>
-                    <option value="#2">#2</option>
-                    <option value="#3">#3</option>
-                    <option value="#4">#4</option>
+                    {% set pos = report.engine_position if report else engine_positions[0] %}
+                    {% for position in engine_positions %}
+                    <option value="{{ position }}"{% if pos == position %} selected{% endif %}>{{ position }}</option>
+                    {% endfor %}
                 </select>
             </div>
             <div class="form-group">
                 <label for="date">Inspection Date</label>
-                <input type="date" id="date" name="date" value="{{ today }}">
+                <input type="date" id="date" name="date" value="{{ report.date if report else today }}">
             </div>
             <div class="form-group">
                 <label for="po">P/O Reference</label>
-                <input type="text" id="po" name="po" placeholder="Purchase order ref.">
+                <input type="text" id="po" name="po" placeholder="Purchase order ref."
+                    value="{{ report.po if report else '' }}">
             </div>
-            <div class="form-group form-group-full">
-                <label for="inspector">Inspector</label>
-                <input type="text" id="inspector" name="inspector" placeholder="Inspector name">
+        </div>
+
+        <div class="inspection-areas-section">
+            <h3>Engine Inspection Areas</h3>
+            <p class="section-hint">Select all zones inspected during this borescope (multiple selections allowed).</p>
+            <div class="checkbox-grid">
+                {% for area in inspection_areas %}
+                <label class="checkbox-item">
+                    <input type="checkbox" name="inspected_areas" value="{{ area }}"
+                        {% if area in selected_inspected_areas %}checked{% endif %}>
+                    <span>{{ area }}</span>
+                </label>
+                {% endfor %}
             </div>
         </div>
     </section>
@@ -84,7 +138,37 @@
         <div id="gallery" class="photo-gallery" aria-live="polite"></div>
 
         <div id="gallery-empty" class="gallery-empty">
-            <p>No photos yet. Upload borescope images, then assign engine area, defect description and severity for each.</p>
+            <p>No photos yet. Upload borescope images, then set area, defect category, comment and classification for each.</p>
+        </div>
+    </section>
+
+    <section class="card">
+        <div class="card-header">
+            <h2>Inspector Certification</h2>
+            <span class="card-step">Step 3</span>
+        </div>
+        <div class="signature-section">
+            <div class="certification-preview">
+                <p class="certification-label">Certification Statement</p>
+                <p class="certification-text">{{ certification_text }}</p>
+            </div>
+
+            <div class="form-group signature-name-field">
+                <label for="inspector">Inspector Name <span class="required">*</span></label>
+                <input type="text" id="inspector" name="inspector" required placeholder="Full name of inspector"
+                    value="{{ report.inspector if report else '' }}">
+            </div>
+
+            <p class="signature-hint">Sign below using mouse, trackpad or touchscreen.{% if edit_mode and has_existing_signature %} Leave blank to keep the existing signature.{% endif %}</p>
+            <div class="signature-pad-wrapper">
+                <canvas id="signature-pad" class="signature-pad" width="600" height="180"
+                    aria-label="Inspector signature pad"></canvas>
+            </div>
+            <div class="signature-actions">
+                <button type="button" id="clear-signature" class="btn btn-secondary btn-small">Clear Signature</button>
+                <span id="signature-status" class="signature-status">{% if has_existing_signature %}Existing signature on file{% else %}No signature yet{% endif %}</span>
+            </div>
+            <input type="hidden" id="inspector_signature" name="inspector_signature" value="">
         </div>
     </section>
 
@@ -113,7 +197,7 @@
                 <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
                 <path d="M14 2v6h6M12 18v-6M9 15l3 3 3-3"/>
             </svg>
-            Generate PDF Report
+            {% if edit_mode %}Update PDF Report{% else %}Generate PDF Report{% endif %}
         </button>
     </section>
 </form>
@@ -121,7 +205,15 @@
 
 {% block scripts %}
 <script>
-    window.ENGINE_AREAS = {{ engine_areas | tojson }};
+    window.INSPECTION_AREAS = {{ inspection_areas | tojson }};
+    window.DEFECT_CATEGORIES = {{ defect_categories | tojson }};
+    window.EXISTING_PHOTOS = {{ existing_photos | tojson }};
+    window.SOURCE_FOLDER = {{ (source_folder or '') | tojson }};
+    window.REPORT_FILES_BASE = {{ url_for('report_files', folder_name='__FOLDER__', filename='') | tojson }};
+    window.EXISTING_SIGNATURE_URL = {{ existing_signature_url | tojson }};
+    window.HAS_EXISTING_SIGNATURE = {{ has_existing_signature | tojson }};
 </script>
+<script src="{{ url_for('static', filename='js/form-selectors.js') }}"></script>
+<script src="{{ url_for('static', filename='js/signature.js') }}"></script>
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 {% endblock %}
