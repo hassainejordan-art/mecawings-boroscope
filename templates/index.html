@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+
+{% block title %}New Report{% endblock %}
+
+{% block content %}
+<section class="page-hero">
+    <h1>Borescope Inspection Report</h1>
+    <p class="hero-subtitle">CFM56 Engine — Document findings by engine area with photos, defect descriptions and severity</p>
+</section>
+
+<form id="report-form" action="{{ url_for('submit_report') }}" method="POST" enctype="multipart/form-data" class="report-form">
+
+    <section class="card">
+        <div class="card-header">
+            <h2>Aircraft &amp; Engine Information</h2>
+            <span class="card-step">Step 1</span>
+        </div>
+        <div class="form-grid">
+            <div class="form-group">
+                <label for="customer">Customer <span class="required">*</span></label>
+                <input type="text" id="customer" name="customer" required placeholder="Airline / Operator name">
+            </div>
+            <div class="form-group">
+                <label for="aircraft">Aircraft Type</label>
+                <input type="text" id="aircraft" name="aircraft" value="B737-800" placeholder="B737-800">
+            </div>
+            <div class="form-group">
+                <label for="registration">Registration</label>
+                <input type="text" id="registration" name="registration" placeholder="F-XXXX">
+            </div>
+            <div class="form-group">
+                <label for="msn">MSN</label>
+                <input type="text" id="msn" name="msn" placeholder="MSN number">
+            </div>
+            <div class="form-group">
+                <label for="engine_sn">Engine S/N <span class="required">*</span></label>
+                <input type="text" id="engine_sn" name="engine_sn" required placeholder="CFM56-7B26 S/N">
+            </div>
+            <div class="form-group">
+                <label for="engine_position">Engine Position</label>
+                <select id="engine_position" name="engine_position">
+                    <option value="LH">Left Hand (LH)</option>
+                    <option value="RH">Right Hand (RH)</option>
+                    <option value="#1">#1</option>
+                    <option value="#2">#2</option>
+                    <option value="#3">#3</option>
+                    <option value="#4">#4</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="date">Inspection Date</label>
+                <input type="date" id="date" name="date" value="{{ today }}">
+            </div>
+            <div class="form-group">
+                <label for="po">P/O Reference</label>
+                <input type="text" id="po" name="po" placeholder="Purchase order ref.">
+            </div>
+            <div class="form-group form-group-full">
+                <label for="inspector">Inspector</label>
+                <input type="text" id="inspector" name="inspector" placeholder="Inspector name">
+            </div>
+        </div>
+    </section>
+
+    <section class="card">
+        <div class="card-header">
+            <h2>Photo Upload</h2>
+            <span class="card-step">Step 2</span>
+        </div>
+
+        <div id="drop-zone" class="drop-zone" tabindex="0" role="button" aria-label="Upload photos">
+            <div class="drop-zone-content">
+                <svg class="drop-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <path d="M12 16V4m0 0l-4 4m4-4l4 4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"/>
+                </svg>
+                <p class="drop-title">Drag &amp; drop photos here</p>
+                <p class="drop-hint">or tap to browse — multiple files supported (JPG, PNG, WEBP)</p>
+            </div>
+            <input type="file" id="photo-input" name="photos" multiple accept="image/*" class="file-input-hidden">
+        </div>
+
+        <input type="hidden" id="photos_meta" name="photos_meta" value="[]">
+
+        <div id="gallery" class="photo-gallery" aria-live="polite"></div>
+
+        <div id="gallery-empty" class="gallery-empty">
+            <p>No photos yet. Upload borescope images, then assign engine area, defect description and severity for each.</p>
+        </div>
+    </section>
+
+    <section class="card card-actions">
+        <div class="summary-bar" id="summary-bar" hidden>
+            <div class="summary-item summary-acceptable">
+                <span class="summary-count" id="count-acceptable">0</span>
+                <span class="summary-label">Acceptable</span>
+            </div>
+            <div class="summary-item summary-monitor">
+                <span class="summary-count" id="count-monitor">0</span>
+                <span class="summary-label">Monitor</span>
+            </div>
+            <div class="summary-item summary-reject">
+                <span class="summary-count" id="count-reject">0</span>
+                <span class="summary-label">Reject</span>
+            </div>
+            <div class="summary-item summary-total">
+                <span class="summary-count" id="count-total">0</span>
+                <span class="summary-label">Total</span>
+            </div>
+        </div>
+
+        <button type="submit" id="submit-btn" class="btn btn-primary" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
+                <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+                <path d="M14 2v6h6M12 18v-6M9 15l3 3 3-3"/>
+            </svg>
+            Generate PDF Report
+        </button>
+    </section>
+</form>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    window.ENGINE_AREAS = {{ engine_areas | tojson }};
+</script>
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+{% endblock %}

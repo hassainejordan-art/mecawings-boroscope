@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 48" fill="none">
+  <rect width="200" height="48" rx="4" fill="#0B3D6B"/>
+  <path d="M12 14h8l6 20h-6l-1.2-4.5H15.2L14 34h-6l6-20zm5.5 12h3.5L18 18.5 17.5 26z" fill="#FFFFFF"/>
+  <text x="38" y="22" font-family="Inter, Arial, sans-serif" font-size="14" font-weight="700" fill="#FFFFFF">MECAWINGS</text>
+  <text x="38" y="36" font-family="Inter, Arial, sans-serif" font-size="8" fill="#00A676" letter-spacing="1.5">AEROSPACE MRO</text>
+  <path d="M155 24c0-6.6 5.4-12 12-12s12 5.4 12 12-5.4 12-12 12" stroke="#00A676" stroke-width="2" fill="none"/>
+  <path d="M167 18l-4 6h8l-4-6z" fill="#00A676"/>
+</svg>

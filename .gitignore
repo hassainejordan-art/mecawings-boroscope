@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Environment
+.env
+.env.*
+
+# Runtime uploads and generated reports
+static/photos/*
+!static/photos/.gitkeep
+static/reports/*
+!static/reports/.gitkeep
+
+# Auto-generated assets
+static/img/logo.png
+static/img/test_upload.jpg
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
