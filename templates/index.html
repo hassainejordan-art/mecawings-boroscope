@@ -216,16 +216,26 @@
             <h2 id="amm-modal-title">Select AMM Reference</h2>
             <button type="button" id="amm-modal-close" class="btn-icon-only" aria-label="Close">&times;</button>
         </div>
-        <p class="amm-modal-hint">Documents are filtered by the aircraft and engine type selected in Step 1.</p>
+        <p class="amm-modal-hint">Search by keyword, ATA, engine type, or AMM reference. Filtered by aircraft and engine from Step 1.</p>
         <div class="ai-advisory-banner ai-advisory-banner-compact" role="note">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="ai-advisory-icon" aria-hidden="true">
                 <path d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
             </svg>
             <p>{{ ai_advisory_warning }}</p>
         </div>
-        <div class="form-group">
-            <label for="amm-modal-search">Search by document name</label>
-            <input type="text" id="amm-modal-search" placeholder="Search AMM documents…">
+        <div class="form-grid amm-modal-search-grid">
+            <div class="form-group form-group-full">
+                <label for="amm-modal-keyword">Keyword</label>
+                <input type="text" id="amm-modal-keyword" placeholder="Search inside AMM text…">
+            </div>
+            <div class="form-group">
+                <label for="amm-modal-ata">ATA Chapter</label>
+                <input type="text" id="amm-modal-ata" placeholder="72-00">
+            </div>
+            <div class="form-group">
+                <label for="amm-modal-reference">AMM Reference</label>
+                <input type="text" id="amm-modal-reference" placeholder="Document name or revision">
+            </div>
         </div>
         <div id="amm-modal-results" class="amm-modal-results"></div>
         <p id="amm-modal-empty" class="amm-modal-empty" hidden>No matching AMM documents. Upload references in the AMM Library.</p>

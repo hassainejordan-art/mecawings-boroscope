@@ -5,7 +5,7 @@
 {% block content %}
 <section class="page-hero">
     <h1>AMM Library</h1>
-    <p class="hero-subtitle">Upload and manage Aircraft Maintenance Manual references organized by aircraft, engine and ATA chapter</p>
+    <p class="hero-subtitle">Upload and search Aircraft Maintenance Manual references by keyword, ATA, engine type and document metadata</p>
 </section>
 
 <div class="ai-advisory-banner" role="note">
@@ -70,6 +70,7 @@
             <div class="form-group form-group-full">
                 <label for="amm_pdf">PDF File <span class="required">*</span></label>
                 <input type="file" id="amm_pdf" name="amm_pdf" accept="application/pdf,.pdf" required>
+                <p class="field-hint">PDF text is extracted automatically on upload for keyword search.</p>
             </div>
         </div>
         <div class="search-actions">
@@ -84,10 +85,10 @@
     </div>
     <form method="GET" action="{{ url_for('amm_library') }}" class="search-form">
         <div class="form-grid">
-            <div class="form-group">
-                <label for="search_aircraft_type">Aircraft Type</label>
-                <input type="text" id="search_aircraft_type" name="aircraft_type" placeholder="B737-800"
-                    value="{{ search.aircraft_type }}">
+            <div class="form-group form-group-full">
+                <label for="search_keyword">Keyword (full-text in PDF)</label>
+                <input type="text" id="search_keyword" name="keyword" placeholder="Search inside document text…"
+                    value="{{ search.keyword }}">
             </div>
             <div class="form-group">
                 <label for="search_engine_type">Engine Type</label>
@@ -100,14 +101,19 @@
                     value="{{ search.ata_chapter }}">
             </div>
             <div class="form-group">
+                <label for="search_amm_reference">AMM Reference</label>
+                <input type="text" id="search_amm_reference" name="amm_reference" placeholder="Document name or revision"
+                    value="{{ search.amm_reference }}">
+            </div>
+            <div class="form-group">
+                <label for="search_aircraft_type">Aircraft Type</label>
+                <input type="text" id="search_aircraft_type" name="aircraft_type" placeholder="B737-800"
+                    value="{{ search.aircraft_type }}">
+            </div>
+            <div class="form-group">
                 <label for="search_document_name">Document Name</label>
                 <input type="text" id="search_document_name" name="document_name" placeholder="AMM"
                     value="{{ search.document_name }}">
-            </div>
-            <div class="form-group">
-                <label for="search_revision">Revision</label>
-                <input type="text" id="search_revision" name="revision" placeholder="Rev"
-                    value="{{ search.revision }}">
             </div>
         </div>
         <div class="search-actions">
@@ -134,6 +140,7 @@
                     <th>Document Name</th>
                     <th>Revision</th>
                     <th>Upload Date</th>
+                    <th>Indexed</th>
                     <th>Actions</th>
                 </tr>
             </thead>
@@ -143,9 +150,15 @@
                     <td>{{ doc.aircraft_type }}</td>
                     <td>{{ doc.engine_type }}</td>
                     <td>{{ doc.ata_chapter }}</td>
-                    <td><strong>{{ doc.document_name }}</strong></td>
+                    <td>
+                        <strong>{{ doc.document_name }}</strong>
+                        {% if doc.text_excerpt %}
+                        <p class="amm-text-excerpt">{{ doc.text_excerpt }}</p>
+                        {% endif %}
+                    </td>
                     <td>{{ doc.revision or '—' }}</td>
                     <td>{{ doc.upload_date }}</td>
+                    <td>{% if doc.has_extracted_text %}Yes{% else %}No{% endif %}</td>
                     <td class="history-actions">
                         <a href="{{ url_for('amm_library_download', doc_id=doc.id) }}"
                            class="btn btn-secondary btn-small">Download</a>
@@ -159,7 +172,7 @@
     </div>
     {% else %}
     <div class="gallery-empty">
-        <p>No AMM documents found.{% if search.aircraft_type or search.engine_type or search.ata_chapter or search.document_name or search.revision %} Try adjusting your search.{% else %} Upload your first document above.{% endif %}</p>
+        <p>No AMM documents found.{% if search.keyword or search.engine_type or search.ata_chapter or search.amm_reference or search.aircraft_type or search.document_name %} Try adjusting your search.{% else %} Upload your first document above.{% endif %}</p>
     </div>
     {% endif %}
 </section>

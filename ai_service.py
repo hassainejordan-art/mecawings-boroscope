@@ -18,6 +18,36 @@ def get_advisory_warning():
     return AI_ADVISORY_WARNING
 
 
+def search_amm_context(base_dir, query, engine_type="", ata="", inspected_area=""):
+    """
+    Return the most relevant AMM text snippets for manual review or future AI use.
+
+    Does not make automatic airworthiness decisions.
+    """
+    from amm_storage import search_amm_snippets
+
+    snippets = search_amm_snippets(
+        base_dir,
+        query=query or "",
+        engine_type=engine_type or "",
+        ata=ata or "",
+        inspected_area=inspected_area or "",
+    )
+    return {
+        "advisory_warning": AI_ADVISORY_WARNING,
+        "query": query,
+        "engine_type": engine_type,
+        "ata": ata,
+        "inspected_area": inspected_area,
+        "snippets": snippets,
+        "airworthiness_decision": None,
+        "message": (
+            "AMM excerpts are provided for reference only. "
+            "Validate all findings against approved maintenance data."
+        ),
+    }
+
+
 def suggest_finding_classification(image_path=None, finding_context=None, amm_reference=None):
     """
     Placeholder for future AI-assisted finding analysis.
@@ -34,6 +64,7 @@ def suggest_finding_classification(image_path=None, finding_context=None, amm_re
         "suggested_comment": None,
         "amm_citations": [],
         "confidence": None,
+        "airworthiness_decision": None,
         "message": "AI suggestions are not yet enabled. Validate all findings manually.",
     }
 
@@ -55,6 +86,7 @@ def build_ai_context_payload(report_data, photo_meta, amm_document=None):
             "defect_category": photo_meta.get("defect_category"),
             "comment": photo_meta.get("comment"),
             "classification": photo_meta.get("classification"),
+            "maintenance_data_reference": photo_meta.get("maintenance_data_reference"),
         },
         "amm_reference": amm_document,
         "advisory_warning": AI_ADVISORY_WARNING,

@@ -76,6 +76,9 @@
             comment: p.comment,
             classification: p.classification,
         };
+        if (p.maintenance_data_reference) {
+            payload.maintenance_data_reference = p.maintenance_data_reference;
+        }
         if (p.amm_reference_id) {
             payload.amm_reference_id = p.amm_reference_id;
             payload.amm_reference_label = p.amm_reference_label;
@@ -114,27 +117,18 @@
             + (card.dataset.existing === '1' ? ' photo-card-existing' : '');
     }
 
-    function formatAmmReference(doc) {
+    function formatAmmReference(doc, snippet) {
         if (!doc) return '';
         const parts = [doc.document_name, doc.ata_chapter];
         if (doc.revision) parts.push('Rev ' + doc.revision);
-        return parts.filter(Boolean).join(' — ');
+        let label = parts.filter(Boolean).join(' — ');
+        if (snippet) label += '\n' + snippet.trim();
+        return label;
     }
 
-    function updateAmmReferenceDisplay(card, photo) {
-        const label = card.querySelector('.amm-reference-label');
-        const clearBtn = card.querySelector('.btn-clear-amm');
-        if (!label) return;
-
-        if (photo.amm_reference_label) {
-            label.textContent = photo.amm_reference_label;
-            label.hidden = false;
-            if (clearBtn) clearBtn.hidden = false;
-        } else {
-            label.textContent = '';
-            label.hidden = true;
-            if (clearBtn) clearBtn.hidden = true;
-        }
+    function updateMaintenanceReferenceField(card, photo) {
+        const field = card.querySelector('.maintenance-data-ref-input');
+        if (field) field.value = photo.maintenance_data_reference || '';
     }
 
     function setAmmReference(photo, card, doc) {
@@ -149,7 +143,8 @@
             document_name: doc.document_name,
             revision: doc.revision || '',
         };
-        updateAmmReferenceDisplay(card, photo);
+        photo.maintenance_data_reference = formatAmmReference(doc, doc.text_excerpt);
+        updateMaintenanceReferenceField(card, photo);
         syncMeta();
     }
 
@@ -157,7 +152,8 @@
         delete photo.amm_reference_id;
         delete photo.amm_reference_label;
         delete photo.amm_reference;
-        updateAmmReferenceDisplay(card, photo);
+        photo.maintenance_data_reference = '';
+        updateMaintenanceReferenceField(card, photo);
         syncMeta();
     }
 
@@ -193,11 +189,11 @@
                 </div>
                 <div class="amm-reference-section">
                     <div class="amm-reference-header">
-                        <label>AMM Reference</label>
-                        <button type="button" class="btn btn-secondary btn-small btn-use-amm">Use AMM Reference</button>
+                        <label for="maintenance-data-ref">Maintenance Data Reference</label>
+                        <button type="button" class="btn btn-secondary btn-small btn-use-amm">Search AMM</button>
                     </div>
-                    <p class="amm-reference-label"${photo.amm_reference_label ? '' : ' hidden'}>${photo.amm_reference_label || ''}</p>
-                    <button type="button" class="btn-link btn-clear-amm"${photo.amm_reference_label ? '' : ' hidden'}>Clear reference</button>
+                    <textarea class="maintenance-data-ref-input" rows="2" placeholder="Select from AMM Library or enter approved maintenance data reference…">${photo.maintenance_data_reference || ''}</textarea>
+                    <button type="button" class="btn-link btn-clear-amm"${photo.amm_reference_id ? '' : ' hidden'}>Clear AMM link</button>
                 </div>
                 <div class="photo-card-actions">
                     <div class="form-group form-group-inline">
@@ -225,15 +221,22 @@
         const badge = card.querySelector('.classification-badge');
         const useAmmBtn = card.querySelector('.btn-use-amm');
         const clearAmmBtn = card.querySelector('.btn-clear-amm');
+        const maintenanceRefInput = card.querySelector('.maintenance-data-ref-input');
 
         classificationSelect.value = photo.classification;
 
         useAmmBtn.addEventListener('click', () => {
             if (window.AmmReferencePicker) {
-                window.AmmReferencePicker.open(photo.id, (doc) => setAmmReference(photo, card, doc));
+                window.AmmReferencePicker.open(photo.id, (doc) => setAmmReference(photo, card, doc), {
+                    inspected_area: photo.area,
+                });
             }
         });
         clearAmmBtn.addEventListener('click', () => clearAmmReference(photo, card));
+        maintenanceRefInput.addEventListener('input', () => {
+            photo.maintenance_data_reference = maintenanceRefInput.value.trim();
+            syncMeta();
+        });
 
         areaSelect.addEventListener('change', () => { photo.area = areaSelect.value; syncMeta(); });
         categorySelect.addEventListener('change', () => { photo.defect_category = categorySelect.value; syncMeta(); });
@@ -264,6 +267,9 @@
             norm.amm_reference_id = data.amm_reference_id;
             norm.amm_reference_label = data.amm_reference_label || '';
             norm.amm_reference = data.amm_reference || null;
+        }
+        if (data.maintenance_data_reference) {
+            norm.maintenance_data_reference = data.maintenance_data_reference;
         }
         return norm;
     }

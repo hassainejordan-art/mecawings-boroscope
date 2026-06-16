@@ -39,7 +39,7 @@ from amm_storage import (
     save_amm_document,
     search_amm_documents,
 )
-from ai_service import get_advisory_warning, is_ai_enabled, suggest_finding_classification
+from ai_service import get_advisory_warning, is_ai_enabled, search_amm_context, suggest_finding_classification
 from report_numbering import allocate_report_number, peek_next_report_number, sync_counter_from_reports
 from report_storage import (
     build_folder_name,
@@ -154,6 +154,12 @@ def normalize_photo_meta(meta):
         result["amm_reference_id"] = meta.get("amm_reference_id")
         result["amm_reference_label"] = meta.get("amm_reference_label", "")
         result["amm_reference"] = meta.get("amm_reference")
+
+    maintenance_ref = (meta.get("maintenance_data_reference") or "").strip()
+    if maintenance_ref:
+        result["maintenance_data_reference"] = maintenance_ref
+    elif result.get("amm_reference_label"):
+        result["maintenance_data_reference"] = result["amm_reference_label"]
 
     return result
 
@@ -270,6 +276,8 @@ def _save_photos_to_folder(photos_dir, uploaded_files, photos_meta, start_index=
             entry["amm_reference_id"] = meta["amm_reference_id"]
             entry["amm_reference_label"] = meta.get("amm_reference_label", "")
             entry["amm_reference"] = meta.get("amm_reference")
+        if meta.get("maintenance_data_reference"):
+            entry["maintenance_data_reference"] = meta["maintenance_data_reference"]
         entries.append(entry)
         file_index += 1
 
@@ -299,6 +307,8 @@ def _merge_existing_photos(existing_meta, photos_dir):
             entry["amm_reference_id"] = normalized["amm_reference_id"]
             entry["amm_reference_label"] = normalized.get("amm_reference_label", "")
             entry["amm_reference"] = normalized.get("amm_reference")
+        if normalized.get("maintenance_data_reference"):
+            entry["maintenance_data_reference"] = normalized["maintenance_data_reference"]
         entries.append(entry)
     return entries
 
@@ -341,6 +351,9 @@ def save_report(folder_name, report_data, photo_entries, signature_path=None, is
                     "amm_reference_label": p.get("amm_reference_label", ""),
                     "amm_reference": p.get("amm_reference"),
                 } if p.get("amm_reference_id") else {}),
+                **({
+                    "maintenance_data_reference": p.get("maintenance_data_reference", ""),
+                } if p.get("maintenance_data_reference") else {}),
             }
             for p in photo_entries
         ],
@@ -364,6 +377,8 @@ def save_report(folder_name, report_data, photo_entries, signature_path=None, is
             photo_payload["amm_reference_id"] = p["amm_reference_id"]
             photo_payload["amm_reference_label"] = p.get("amm_reference_label", "")
             photo_payload["amm_reference"] = p.get("amm_reference")
+        if p.get("maintenance_data_reference"):
+            photo_payload["maintenance_data_reference"] = p["maintenance_data_reference"]
         pdf_photos.append(photo_payload)
 
     pdf_path = os.path.join(report_dir, pdf_filename_for(report_data["report_number"]))
@@ -630,14 +645,28 @@ def view_report(report_key):
 @app.route("/amm-library", methods=["GET"])
 def amm_library():
     search = {
-        "aircraft_type": request.args.get("aircraft_type", "").strip(),
+        "keyword": request.args.get("keyword", "").strip(),
         "engine_type": request.args.get("engine_type", "").strip(),
         "ata_chapter": request.args.get("ata_chapter", "").strip(),
+        "amm_reference": request.args.get("amm_reference", "").strip(),
+        "aircraft_type": request.args.get("aircraft_type", "").strip(),
         "document_name": request.args.get("document_name", "").strip(),
         "revision": request.args.get("revision", "").strip(),
     }
     has_search = any(search.values())
-    results = search_amm_documents(BASE_DIR, **search) if has_search else list_amm_documents(BASE_DIR)
+    if has_search:
+        results = search_amm_documents(
+            BASE_DIR,
+            keyword=search["keyword"],
+            engine_type=search["engine_type"],
+            ata_chapter=search["ata_chapter"],
+            amm_reference=search["amm_reference"],
+            aircraft_type=search["aircraft_type"],
+            document_name=search["document_name"],
+            revision=search["revision"],
+        )
+    else:
+        results = list_amm_documents(BASE_DIR)
 
     return render_template(
         "amm_library.html",
@@ -707,13 +736,29 @@ def amm_library_view(doc_id):
 def api_amm_documents():
     documents = search_amm_documents(
         BASE_DIR,
-        aircraft_type=request.args.get("aircraft_type", "").strip(),
+        keyword=request.args.get("keyword", "").strip(),
         engine_type=request.args.get("engine_type", "").strip(),
         ata_chapter=request.args.get("ata_chapter", "").strip(),
+        amm_reference=request.args.get("amm_reference", "").strip(),
+        aircraft_type=request.args.get("aircraft_type", "").strip(),
         document_name=request.args.get("document_name", "").strip(),
         revision=request.args.get("revision", "").strip(),
     )
-    return {"documents": documents, "advisory_warning": get_advisory_warning()}
+    return {
+        "documents": documents,
+        "advisory_warning": get_advisory_warning(),
+    }
+
+
+@app.route("/api/amm-context", methods=["GET"])
+def api_amm_context():
+    return search_amm_context(
+        BASE_DIR,
+        query=request.args.get("query", "").strip(),
+        engine_type=request.args.get("engine_type", "").strip(),
+        ata=request.args.get("ata", "").strip(),
+        inspected_area=request.args.get("inspected_area", "").strip(),
+    )
 
 
 @app.route("/api/ai/suggest-finding", methods=["POST"])

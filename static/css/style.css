@@ -1266,9 +1266,54 @@ body {
     background: rgba(15, 23, 42, 0.55);
 }
 
+.maintenance-data-ref-input {
+    width: 100%;
+    min-height: 3.5rem;
+    padding: 0.5rem 0.65rem;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    font-family: var(--font);
+    font-size: 0.8rem;
+    line-height: 1.45;
+    resize: vertical;
+    background: #F8FAFC;
+}
+
+.maintenance-data-ref-input:focus {
+    outline: none;
+    border-color: var(--color-primary-light);
+    box-shadow: 0 0 0 3px rgba(26, 95, 158, 0.12);
+}
+
+.amm-modal-search-grid {
+    padding: 0;
+    margin-bottom: 0.5rem;
+}
+
+.amm-modal-result-excerpt {
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+    line-height: 1.4;
+    margin-top: 0.25rem;
+}
+
+.amm-text-excerpt {
+    margin-top: 0.35rem;
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+    line-height: 1.4;
+    max-width: 280px;
+}
+
+.field-hint {
+    margin-top: 0.35rem;
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+}
+
 .amm-modal-panel {
     position: relative;
-    width: min(560px, 100%);
+    width: min(640px, 100%);
     max-height: min(80vh, 640px);
     overflow: auto;
     background: var(--color-surface);

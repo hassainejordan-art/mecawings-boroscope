@@ -110,6 +110,13 @@ def _get_area(photo):
     return photo.get("area", "—")
 
 
+def _get_maintenance_data_reference(photo):
+    ref = (photo.get("maintenance_data_reference") or "").strip()
+    if ref:
+        return ref
+    return _get_amm_reference(photo)
+
+
 def _get_amm_reference(photo):
     label = (photo.get("amm_reference_label") or "").strip()
     if label:
@@ -352,23 +359,23 @@ def _summary_page(counts, total, sty):
 
 
 def _findings_summary_table(photos, sty):
-    header = ["#", "Area", "Defect Category", "AMM Reference", "Comment", "Classification"]
+    header = ["#", "Area", "Defect Category", "Maint. Data Ref.", "Comment", "Classification"]
     rows = [header]
     for idx, photo in enumerate(photos, start=1):
         classification = _get_classification(photo)
         color = SEVERITY_COLORS.get(classification, colors.grey).hexval()
         comment = _get_comment(photo) or "—"
-        amm_ref = _get_amm_reference(photo) or "—"
+        maint_ref = _get_maintenance_data_reference(photo) or "—"
         rows.append([
             str(idx),
             _get_area(photo),
             _get_defect_category(photo),
-            amm_ref[:40] + ("…" if len(amm_ref) > 40 else ""),
-            comment[:40] + ("…" if len(comment) > 40 else ""),
+            maint_ref[:35] + ("…" if len(maint_ref) > 35 else ""),
+            comment[:35] + ("…" if len(comment) > 35 else ""),
             Paragraph(f'<font color="{color}"><b>{classification.upper()}</b></font>', sty["body"]),
         ])
 
-    table = Table(rows, colWidths=[0.8 * cm, 2.5 * cm, 2.8 * cm, 3.5 * cm, 3.5 * cm, 2.5 * cm], repeatRows=1)
+    table = Table(rows, colWidths=[0.7 * cm, 2.2 * cm, 2.5 * cm, 3.2 * cm, 3.2 * cm, 2.5 * cm], repeatRows=1)
     table.setStyle(
         TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), BRAND_PRIMARY),
@@ -575,10 +582,10 @@ def generate_borescope_report(report_data, photos, output_path, logo_path=None, 
         story.append(meta_row)
         story.append(Spacer(1, 0.25 * cm))
 
-        amm_ref = _get_amm_reference(photo)
+        amm_ref = _get_maintenance_data_reference(photo)
         if amm_ref:
             amm_box = Table(
-                [[Paragraph(f"<b>AMM Reference:</b> {amm_ref}", sty["body"])]],
+                [[Paragraph(f"<b>Maintenance Data Reference:</b> {amm_ref.replace(chr(10), '<br/>')}", sty["body"])]],
                 colWidths=[17 * cm],
             )
             amm_box.setStyle(TableStyle([
