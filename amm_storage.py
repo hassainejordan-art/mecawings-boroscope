@@ -7,7 +7,7 @@ from datetime import datetime
 
 from werkzeug.utils import secure_filename
 
-from amm_pdf import extract_pdf_text
+from amm_pdf import extract_pdf_bytes, extract_pdf_text
 from storage_config import get_amm_files_root, get_db_path
 
 SNIPPET_MAX_LEN = 320
@@ -203,11 +203,134 @@ def _migrate_amm_file_locations(base_dir):
                 )
 
 
+def _original_filename_from_stored(stored_filename):
+    match = re.match(r"^[0-9a-f]{8}_(.+)$", stored_filename, re.I)
+    return match.group(1) if match else stored_filename
+
+
+def _parse_amm_path_metadata(base_dir, absolute_path):
+    """Read aircraft, engine, and ATA folder names from an on-disk AMM path."""
+    for root in (get_amm_files_root(base_dir), _legacy_static_amm_root(base_dir)):
+        prefix = root + os.sep
+        if not absolute_path.startswith(prefix):
+            continue
+        rel_parts = os.path.relpath(absolute_path, root).split(os.sep)
+        if len(rel_parts) >= 4:
+            aircraft, engine, ata_code = rel_parts[0], rel_parts[1], rel_parts[2]
+            ata_chapter = ata_code.replace("_", "-")
+            if re.match(r"\d{2}-\d{2}", ata_chapter):
+                return aircraft, engine, ata_chapter
+            return aircraft, engine, f"{ata_chapter} — General"
+    return None, None, None
+
+
+def _register_existing_amm_pdf(base_dir, absolute_path, aircraft_type, engine_type,
+                               ata_chapter, document_name, revision=""):
+    stored_filename = os.path.basename(absolute_path)
+    with open(absolute_path, "rb") as handle:
+        pdf_bytes = handle.read()
+
+    extracted_text = extract_pdf_bytes(pdf_bytes) or extract_pdf_text(absolute_path)
+    amm_reference = build_stored_amm_reference(document_name, ata_chapter, revision)
+    if not extracted_text:
+        extracted_text = build_metadata_index_text({
+            "document_name": document_name,
+            "aircraft_type": aircraft_type,
+            "engine_type": engine_type,
+            "ata_chapter": ata_chapter,
+            "amm_reference": amm_reference,
+            "revision": revision,
+            "stored_filename": stored_filename,
+        })
+
+    data_root = get_amm_files_root(base_dir)
+    if absolute_path.startswith(data_root):
+        relative_path = os.path.relpath(absolute_path, base_dir)
+    elif absolute_path.startswith(base_dir):
+        relative_path = os.path.relpath(absolute_path, base_dir)
+    else:
+        relative_path = absolute_path
+
+    file_mtime = datetime.fromtimestamp(os.path.getmtime(absolute_path))
+    upload_date = file_mtime.strftime("%Y-%m-%d")
+    created_at = file_mtime.isoformat()
+
+    with get_connection(base_dir) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO amm_documents (
+                aircraft_type, engine_type, ata_chapter, document_name, revision,
+                amm_reference, stored_filename, file_path, upload_date, created_at,
+                extracted_text
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                aircraft_type, engine_type, ata_chapter, document_name, revision,
+                amm_reference, stored_filename, relative_path, upload_date, created_at,
+                extracted_text,
+            ),
+        )
+        doc_id = cursor.lastrowid
+        row = conn.execute(
+            "SELECT * FROM amm_documents WHERE id = ?",
+            (doc_id,),
+        ).fetchone()
+
+    return _row_to_document(base_dir, row, include_text=True)
+
+
+def import_orphan_amm_pdfs(base_dir):
+    """
+    Register PDFs saved on disk that are missing from amm_documents.
+    This recovers uploads that failed after the file was written.
+    """
+    with get_connection(base_dir) as conn:
+        known = {
+            row[0]
+            for row in conn.execute("SELECT stored_filename FROM amm_documents").fetchall()
+        }
+
+    imported = []
+    scan_roots = [get_amm_files_root(base_dir), _legacy_static_amm_root(base_dir)]
+
+    for root in scan_roots:
+        if not os.path.isdir(root):
+            continue
+        for dirpath, _, files in os.walk(root):
+            for filename in files:
+                if not filename.lower().endswith(".pdf") or filename in known:
+                    continue
+
+                absolute_path = os.path.join(dirpath, filename)
+                aircraft, engine, ata = _parse_amm_path_metadata(base_dir, absolute_path)
+                if not all([aircraft, engine, ata]):
+                    continue
+
+                original = _original_filename_from_stored(filename)
+                document_name = os.path.splitext(original)[0].replace("_", " ").strip()
+                if not document_name:
+                    document_name = original
+
+                doc = _register_existing_amm_pdf(
+                    base_dir,
+                    absolute_path,
+                    aircraft_type=aircraft.replace("_", "-"),
+                    engine_type=engine.replace("_", "-"),
+                    ata_chapter=ata,
+                    document_name=document_name,
+                )
+                imported.append(doc)
+                known.add(filename)
+
+    return imported
+
+
 def init_amm_storage(base_dir):
     os.makedirs(get_amm_files_root(base_dir), exist_ok=True)
     with get_connection(base_dir) as conn:
         _ensure_schema(conn)
     _migrate_amm_file_locations(base_dir)
+    import_orphan_amm_pdfs(base_dir)
     reindex_all_amm_documents(base_dir, only_missing=True)
 
 

@@ -713,8 +713,8 @@ def amm_library_upload():
         flash("AMM document uploaded successfully.", "success")
     except ValueError as exc:
         flash(str(exc), "error")
-    except Exception:
-        flash("Failed to upload AMM document.", "error")
+    except Exception as exc:
+        flash(f"Failed to upload AMM document: {exc}", "error")
 
     return redirect(url_for("amm_library"))
 
