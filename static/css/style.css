@@ -1305,6 +1305,39 @@ body {
     max-width: 280px;
 }
 
+.amm-index-status {
+    display: inline-block;
+    font-size: 0.75rem;
+    font-weight: 600;
+    padding: 0.15rem 0.45rem;
+    border-radius: 999px;
+    background: #E5E7EB;
+    color: #374151;
+}
+
+.amm-index-status-indexed {
+    background: #D1FAE5;
+    color: #065F46;
+}
+
+.amm-index-status-indexing {
+    background: #DBEAFE;
+    color: #1E40AF;
+}
+
+.amm-index-status-indexing_failed {
+    background: #FEE2E2;
+    color: #991B1B;
+}
+
+.amm-index-error {
+    margin-top: 0.35rem;
+    font-size: 0.72rem;
+    color: #B45309;
+    line-height: 1.35;
+    max-width: 220px;
+}
+
 .field-hint {
     margin-top: 0.35rem;
     font-size: 0.75rem;

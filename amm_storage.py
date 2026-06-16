@@ -7,11 +7,20 @@ from datetime import datetime
 
 from werkzeug.utils import secure_filename
 
-from amm_pdf import MAX_INDEX_PAGES, extract_pdf_text
+from amm_pdf import MAX_INDEX_PAGES, extract_pdf_text_isolated
 from storage_config import get_amm_files_root, get_db_path
 
 SNIPPET_MAX_LEN = 320
 SNIPPET_CONTEXT = 140
+
+INDEX_STATUS_UPLOADED = "uploaded"
+INDEX_STATUS_INDEXING = "indexing"
+INDEX_STATUS_INDEXED = "indexed"
+INDEX_STATUS_FAILED = "indexing_failed"
+
+INDEXING_FAILED_USER_MESSAGE = (
+    "PDF uploaded but indexing failed. Try a smaller ATA section PDF."
+)
 
 
 def get_connection(base_dir):
@@ -64,6 +73,26 @@ def _legacy_static_amm_root(base_dir):
     return os.path.join(base_dir, "static", "amm")
 
 
+def _resolve_index_status(row):
+    if "index_status" in row.keys() and row["index_status"]:
+        return row["index_status"]
+    if row["indexed"] if "indexed" in row.keys() else False:
+        return INDEX_STATUS_INDEXED
+    index_error = (row["index_error"] or "").strip() if "index_error" in row.keys() else ""
+    if index_error:
+        return INDEX_STATUS_FAILED
+    return INDEX_STATUS_UPLOADED
+
+
+def _index_status_label(status):
+    return {
+        INDEX_STATUS_UPLOADED: "Uploaded",
+        INDEX_STATUS_INDEXING: "Indexing",
+        INDEX_STATUS_INDEXED: "Indexed",
+        INDEX_STATUS_FAILED: "Indexing failed",
+    }.get(status, status)
+
+
 def _row_to_document(base_dir, row, include_text=False, text_excerpt=None):
     extracted = row["extracted_text"] or ""
     pdf_path = resolve_amm_file_path(base_dir, {"file_path": row["file_path"]})
@@ -73,9 +102,9 @@ def _row_to_document(base_dir, row, include_text=False, text_excerpt=None):
             row["document_name"], row["ata_chapter"], row["revision"]
         )
 
-    indexed = bool(row["indexed"]) if "indexed" in row.keys() else bool(extracted.strip())
+    index_status = _resolve_index_status(row)
     index_error = (row["index_error"] or "").strip() if "index_error" in row.keys() else ""
-    index_pending = not indexed and not index_error
+    indexed = index_status == INDEX_STATUS_INDEXED
 
     doc = {
         "id": row["id"],
@@ -89,10 +118,15 @@ def _row_to_document(base_dir, row, include_text=False, text_excerpt=None):
         "file_path": row["file_path"],
         "upload_date": row["upload_date"],
         "created_at": row["created_at"],
+        "index_status": index_status,
+        "index_status_label": _index_status_label(index_status),
         "indexed": indexed,
-        "index_pending": index_pending,
-        "index_failed": not indexed and bool(index_error),
+        "index_pending": index_status in (INDEX_STATUS_UPLOADED, INDEX_STATUS_INDEXING),
+        "index_failed": index_status == INDEX_STATUS_FAILED,
         "index_error": index_error or None,
+        "indexing_failed_message": (
+            INDEXING_FAILED_USER_MESSAGE if index_status == INDEX_STATUS_FAILED else None
+        ),
         "has_extracted_text": bool(extracted.strip()),
         "text_length": len(extracted),
         "pdf_available": pdf_path is not None,
@@ -122,7 +156,8 @@ def _ensure_schema(conn):
             extracted_text TEXT,
             amm_reference TEXT,
             indexed INTEGER NOT NULL DEFAULT 0,
-            index_error TEXT
+            index_error TEXT,
+            index_status TEXT NOT NULL DEFAULT 'uploaded'
         )
         """
     )
@@ -135,14 +170,38 @@ def _ensure_schema(conn):
         conn.execute("ALTER TABLE amm_documents ADD COLUMN indexed INTEGER NOT NULL DEFAULT 0")
     if "index_error" not in columns:
         conn.execute("ALTER TABLE amm_documents ADD COLUMN index_error TEXT")
+    if "index_status" not in columns:
+        conn.execute(
+            "ALTER TABLE amm_documents ADD COLUMN index_status TEXT NOT NULL DEFAULT 'uploaded'"
+        )
 
     conn.execute(
         """
         UPDATE amm_documents
-        SET indexed = 1
-        WHERE indexed = 0
-          AND TRIM(COALESCE(extracted_text, '')) != ''
+        SET indexed = 1,
+            index_status = ?
+        WHERE indexed = 1
+           OR TRIM(COALESCE(extracted_text, '')) != ''
+        """,
+        (INDEX_STATUS_INDEXED,),
+    )
+    conn.execute(
         """
+        UPDATE amm_documents
+        SET index_status = ?
+        WHERE (index_status IS NULL OR index_status = '' OR index_status = 'uploaded')
+          AND indexed = 0
+          AND TRIM(COALESCE(index_error, '')) != ''
+        """,
+        (INDEX_STATUS_FAILED,),
+    )
+    conn.execute(
+        """
+        UPDATE amm_documents
+        SET index_status = ?
+        WHERE index_status IS NULL OR TRIM(index_status) = ''
+        """,
+        (INDEX_STATUS_UPLOADED,),
     )
 
     conn.executescript(
@@ -270,13 +329,13 @@ def _register_existing_amm_pdf(base_dir, absolute_path, aircraft_type, engine_ty
             INSERT INTO amm_documents (
                 aircraft_type, engine_type, ata_chapter, document_name, revision,
                 amm_reference, stored_filename, file_path, upload_date, created_at,
-                extracted_text, indexed, index_error
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                extracted_text, indexed, index_error, index_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 aircraft_type, engine_type, ata_chapter, document_name, revision,
                 amm_reference, stored_filename, relative_path, upload_date, created_at,
-                None, 0, None,
+                None, 0, None, INDEX_STATUS_UPLOADED,
             ),
         )
         doc_id = cursor.lastrowid
@@ -338,6 +397,14 @@ def init_amm_storage(base_dir):
     os.makedirs(get_amm_files_root(base_dir), exist_ok=True)
     with get_connection(base_dir) as conn:
         _ensure_schema(conn)
+        conn.execute(
+            """
+            UPDATE amm_documents
+            SET index_status = ?
+            WHERE index_status = ?
+            """,
+            (INDEX_STATUS_UPLOADED, INDEX_STATUS_INDEXING),
+        )
     _migrate_amm_file_locations(base_dir)
     import_orphan_amm_pdfs(base_dir)
 
@@ -365,37 +432,41 @@ def normalize_index_text(text):
 
 
 def _extract_text_for_row(base_dir, row):
-    """Extract PDF text for a database row, page by page."""
+    """Extract PDF text page by page in an isolated subprocess."""
     document = dict(row)
     absolute = resolve_amm_file_path(base_dir, document)
     if not absolute:
         absolute = _absolute_file_path(base_dir, row["file_path"])
 
     if absolute and os.path.exists(absolute):
-        return extract_pdf_text(absolute, max_pages=MAX_INDEX_PAGES)
+        return extract_pdf_text_isolated(absolute, max_pages=MAX_INDEX_PAGES)
     return ""
 
 
-def _update_document_index(base_dir, doc_id, extracted_text, indexed, index_error=None):
+def _update_document_index(base_dir, doc_id, extracted_text, index_status, index_error=None):
+    indexed = index_status == INDEX_STATUS_INDEXED
     with get_connection(base_dir) as conn:
         conn.execute(
             """
             UPDATE amm_documents
-            SET extracted_text = ?, indexed = ?, index_error = ?
+            SET extracted_text = ?, indexed = ?, index_error = ?, index_status = ?
             WHERE id = ?
             """,
-            (extracted_text or None, 1 if indexed else 0, index_error, doc_id),
+            (extracted_text or None, 1 if indexed else 0, index_error, index_status, doc_id),
         )
 
 
-def _update_document_text(base_dir, doc_id, extracted_text):
-    _update_document_index(
-        base_dir,
-        doc_id,
-        extracted_text,
-        indexed=bool((extracted_text or "").strip()),
-        index_error=None if (extracted_text or "").strip() else "No extractable text found",
-    )
+def _set_index_status(base_dir, doc_id, index_status, index_error=None):
+    indexed = index_status == INDEX_STATUS_INDEXED
+    with get_connection(base_dir) as conn:
+        conn.execute(
+            """
+            UPDATE amm_documents
+            SET indexed = ?, index_error = ?, index_status = ?
+            WHERE id = ?
+            """,
+            (1 if indexed else 0, index_error, index_status, doc_id),
+        )
 
 
 def list_unindexed_amm_document_ids(base_dir):
@@ -403,11 +474,22 @@ def list_unindexed_amm_document_ids(base_dir):
         rows = conn.execute(
             """
             SELECT id FROM amm_documents
-            WHERE indexed = 0
+            WHERE index_status = ?
             ORDER BY created_at ASC
-            """
+            """,
+            (INDEX_STATUS_UPLOADED,),
         ).fetchall()
     return [row[0] for row in rows]
+
+
+def mark_amm_indexing_failed(base_dir, doc_id, technical_error=None):
+    _update_document_index(
+        base_dir,
+        doc_id,
+        extracted_text=None,
+        index_status=INDEX_STATUS_FAILED,
+        index_error=INDEXING_FAILED_USER_MESSAGE,
+    )
 
 
 def extract_and_index_amm_document(base_dir, doc_id):
@@ -419,27 +501,27 @@ def extract_and_index_amm_document(base_dir, doc_id):
         ).fetchone()
     if not row:
         return None
-    if row["indexed"]:
+    if _resolve_index_status(row) == INDEX_STATUS_INDEXED:
         return get_amm_document(base_dir, doc_id)
 
-    extracted_text = ""
-    index_error = None
+    _set_index_status(base_dir, doc_id, INDEX_STATUS_INDEXING)
+
     try:
         extracted_text = _extract_text_for_row(base_dir, row)
-        if not extracted_text:
-            index_error = "No extractable text found"
-    except Exception as exc:
-        index_error = str(exc)[:500] or "Text extraction failed"
+        if extracted_text.strip():
+            _update_document_index(
+                base_dir,
+                doc_id,
+                extracted_text,
+                INDEX_STATUS_INDEXED,
+                index_error=None,
+            )
+        else:
+            mark_amm_indexing_failed(base_dir, doc_id)
+    except Exception:
+        mark_amm_indexing_failed(base_dir, doc_id)
 
-    indexed = bool(extracted_text.strip())
-    _update_document_index(
-        base_dir,
-        doc_id,
-        extracted_text if indexed else None,
-        indexed=indexed,
-        index_error=None if indexed else index_error,
-    )
-    return get_amm_document(base_dir, doc_id, include_text=indexed)
+    return get_amm_document(base_dir, doc_id)
 
 
 def backfill_extracted_text(base_dir):
@@ -451,11 +533,13 @@ def reindex_all_amm_documents(base_dir, only_missing=False):
     from amm_indexing import schedule_amm_indexing
 
     query = "SELECT id FROM amm_documents"
+    params = ()
     if only_missing:
-        query += " WHERE indexed = 0"
+        query += " WHERE index_status = ?"
+        params = (INDEX_STATUS_UPLOADED,)
 
     with get_connection(base_dir) as conn:
-        rows = conn.execute(query).fetchall()
+        rows = conn.execute(query, params).fetchall()
 
     for row in rows:
         schedule_amm_indexing(base_dir, row[0])
@@ -502,6 +586,9 @@ def save_amm_document(base_dir, aircraft_type, engine_type, ata_chapter,
     with open(absolute_path, "wb") as handle:
         shutil.copyfileobj(pdf_file.stream, handle)
 
+    if not os.path.exists(absolute_path) or os.path.getsize(absolute_path) == 0:
+        raise ValueError("Failed to save PDF file")
+
     amm_reference = build_stored_amm_reference(document_name, ata_chapter, revision)
 
     now = datetime.now()
@@ -515,13 +602,13 @@ def save_amm_document(base_dir, aircraft_type, engine_type, ata_chapter,
             INSERT INTO amm_documents (
                 aircraft_type, engine_type, ata_chapter, document_name, revision,
                 amm_reference, stored_filename, file_path, upload_date, created_at,
-                extracted_text, indexed, index_error
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                extracted_text, indexed, index_error, index_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 aircraft_type, engine_type, ata_chapter, document_name, revision,
                 amm_reference, unique_name, relative_path, upload_date, created_at,
-                None, 0, None,
+                None, 0, None, INDEX_STATUS_UPLOADED,
             ),
         )
         doc_id = cursor.lastrowid

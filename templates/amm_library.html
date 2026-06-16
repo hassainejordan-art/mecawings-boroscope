@@ -84,7 +84,7 @@
             <div class="form-group form-group-full">
                 <label for="amm_pdf">PDF File <span class="required">*</span></label>
                 <input type="file" id="amm_pdf" name="amm_pdf" accept="application/pdf,.pdf" required>
-                <p class="field-hint">PDF text is extracted automatically on upload for keyword search.</p>
+                <p class="field-hint">Large PDFs are saved immediately. Text indexing runs in the background (first 300 pages).</p>
             </div>
         </div>
         <div class="search-actions">
@@ -156,6 +156,7 @@
                     <th>Revision</th>
                     <th>Upload Date</th>
                     <th>PDF</th>
+                    <th>Index Status</th>
                     <th>Search</th>
                     <th>Actions</th>
                 </tr>
@@ -176,6 +177,12 @@
                     <td>{{ doc.revision or '—' }}</td>
                     <td>{{ doc.upload_date }}</td>
                     <td>{% if doc.pdf_available %}Yes{% else %}Missing{% endif %}</td>
+                    <td>
+                        <span class="amm-index-status amm-index-status-{{ doc.index_status }}">{{ doc.index_status_label }}</span>
+                        {% if doc.index_failed and doc.indexing_failed_message %}
+                        <p class="amm-index-error">{{ doc.indexing_failed_message }}</p>
+                        {% endif %}
+                    </td>
                     <td>{% if doc.search_available %}Yes{% elif doc.index_pending %}Pending{% else %}No{% endif %}</td>
                     <td class="history-actions">
                         {% if doc.pdf_available %}

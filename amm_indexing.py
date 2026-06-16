@@ -24,6 +24,14 @@ def schedule_amm_indexing(base_dir, doc_id):
             extract_and_index_amm_document(base_dir, doc_id)
         except Exception:
             logger.exception("Background AMM indexing failed for document %s", doc_id)
+            try:
+                from amm_storage import mark_amm_indexing_failed
+
+                mark_amm_indexing_failed(base_dir, doc_id)
+            except Exception:
+                logger.exception(
+                    "Failed to mark AMM document %s as indexing_failed", doc_id
+                )
         finally:
             with _index_lock:
                 _index_pending.discard(doc_id)
@@ -37,7 +45,7 @@ def schedule_amm_indexing(base_dir, doc_id):
 
 
 def schedule_pending_amm_indexing(base_dir):
-    """Queue background indexing for documents not yet indexed."""
+    """Queue background indexing for documents awaiting extraction."""
     from amm_storage import list_unindexed_amm_document_ids
 
     for doc_id in list_unindexed_amm_document_ids(base_dir):

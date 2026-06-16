@@ -1,7 +1,14 @@
+import gc
 import io
+import os
 import re
+import subprocess
+import sys
+import tempfile
 
-MAX_INDEX_PAGES = 500
+MAX_INDEX_PAGES = 300
+GC_EVERY_N_PAGES = 10
+EXTRACTION_TIMEOUT_SECONDS = 600
 
 
 def normalize_extracted_text(text):
@@ -14,14 +21,22 @@ def normalize_extracted_text(text):
 
 
 def _extract_pages(reader, max_pages=MAX_INDEX_PAGES):
-    parts = []
-    for index, page in enumerate(reader.pages):
-        if index >= max_pages:
-            break
-        page_text = page.extract_text() or ""
-        if page_text.strip():
-            parts.append(page_text)
-    return normalize_extracted_text("\n\n".join(parts))
+    """Extract text one page at a time to limit peak memory."""
+    chunks = []
+    page_count = min(len(reader.pages), max_pages)
+    for index in range(page_count):
+        try:
+            page_text = reader.pages[index].extract_text() or ""
+            if page_text.strip():
+                chunks.append(page_text)
+        except Exception:
+            continue
+        if index % GC_EVERY_N_PAGES == 0:
+            gc.collect()
+    result = normalize_extracted_text("\n\n".join(chunks))
+    del chunks
+    gc.collect()
+    return result
 
 
 def _extract_with_pypdf(source, max_pages=MAX_INDEX_PAGES, strict=False):
@@ -35,7 +50,7 @@ def _extract_with_pypdf(source, max_pages=MAX_INDEX_PAGES, strict=False):
 
 
 def extract_pdf_text(pdf_path, max_pages=MAX_INDEX_PAGES):
-    """Extract plain text page by page from a PDF file."""
+    """Extract plain text page by page from a PDF file path."""
     if not pdf_path or not pdf_path.lower().endswith(".pdf"):
         return ""
     try:
@@ -55,3 +70,47 @@ def extract_pdf_bytes(data, max_pages=MAX_INDEX_PAGES):
     if text:
         return text
     return _extract_with_pypdf(io.BytesIO(data), max_pages=max_pages, strict=True)
+
+
+def extract_pdf_text_isolated(pdf_path, max_pages=MAX_INDEX_PAGES):
+    """
+    Run extraction in a subprocess so OOM during PyPDF parsing
+    does not take down the web worker.
+    """
+    if not pdf_path or not pdf_path.lower().endswith(".pdf"):
+        return ""
+
+    worker = """
+import sys
+from amm_pdf import extract_pdf_text, MAX_INDEX_PAGES
+
+pdf_path = sys.argv[1]
+max_pages = int(sys.argv[2]) if len(sys.argv) > 2 else MAX_INDEX_PAGES
+output_path = sys.argv[3]
+text = extract_pdf_text(pdf_path, max_pages=max_pages)
+with open(output_path, "w", encoding="utf-8") as handle:
+    handle.write(text)
+"""
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as handle:
+        output_path = handle.name
+
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", worker, pdf_path, str(max_pages), output_path],
+            capture_output=True,
+            text=True,
+            timeout=EXTRACTION_TIMEOUT_SECONDS,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+        )
+        if result.returncode != 0:
+            stderr = (result.stderr or "").strip()
+            raise RuntimeError(stderr or "PDF extraction subprocess failed")
+
+        with open(output_path, encoding="utf-8") as handle:
+            return handle.read()
+    finally:
+        try:
+            os.unlink(output_path)
+        except OSError:
+            pass
