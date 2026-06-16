@@ -31,6 +31,7 @@ from constants import (
     SEVERITY_LEVELS,
 )
 from pdf_generator import generate_borescope_report
+from amm_indexing import schedule_amm_indexing
 from amm_storage import (
     get_amm_document,
     init_amm_storage,
@@ -691,17 +692,17 @@ def amm_library():
 
 @app.route("/amm-library/upload", methods=["POST"])
 def amm_library_upload():
-    aircraft_type = _resolve_preset_field(
-        request.form.get("aircraft_type"),
-        request.form.get("aircraft_custom"),
-    )
-    engine_type = _resolve_preset_field(
-        request.form.get("engine_type"),
-        request.form.get("engine_custom"),
-    )
-
     try:
-        save_amm_document(
+        aircraft_type = _resolve_preset_field(
+            request.form.get("aircraft_type"),
+            request.form.get("aircraft_custom"),
+        )
+        engine_type = _resolve_preset_field(
+            request.form.get("engine_type"),
+            request.form.get("engine_custom"),
+        )
+
+        document = save_amm_document(
             BASE_DIR,
             aircraft_type=aircraft_type,
             engine_type=engine_type,
@@ -710,11 +711,16 @@ def amm_library_upload():
             revision=request.form.get("revision", "").strip(),
             pdf_file=request.files.get("amm_pdf"),
         )
-        flash("AMM document uploaded successfully.", "success")
+        schedule_amm_indexing(BASE_DIR, document["id"])
+        flash(
+            "AMM document uploaded successfully. Text indexing will continue in the background.",
+            "success",
+        )
     except ValueError as exc:
         flash(str(exc), "error")
-    except Exception as exc:
-        flash(f"Failed to upload AMM document: {exc}", "error")
+    except Exception:
+        app.logger.exception("AMM upload failed")
+        flash("Failed to upload AMM document. Please try again.", "error")
 
     return redirect(url_for("amm_library"))
 

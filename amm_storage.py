@@ -7,7 +7,7 @@ from datetime import datetime
 
 from werkzeug.utils import secure_filename
 
-from amm_pdf import extract_pdf_bytes, extract_pdf_text
+from amm_pdf import MAX_INDEX_PAGES, extract_pdf_text
 from storage_config import get_amm_files_root, get_db_path
 
 SNIPPET_MAX_LEN = 320
@@ -73,6 +73,10 @@ def _row_to_document(base_dir, row, include_text=False, text_excerpt=None):
             row["document_name"], row["ata_chapter"], row["revision"]
         )
 
+    indexed = bool(row["indexed"]) if "indexed" in row.keys() else bool(extracted.strip())
+    index_error = (row["index_error"] or "").strip() if "index_error" in row.keys() else ""
+    index_pending = not indexed and not index_error
+
     doc = {
         "id": row["id"],
         "aircraft_type": row["aircraft_type"],
@@ -85,10 +89,14 @@ def _row_to_document(base_dir, row, include_text=False, text_excerpt=None):
         "file_path": row["file_path"],
         "upload_date": row["upload_date"],
         "created_at": row["created_at"],
+        "indexed": indexed,
+        "index_pending": index_pending,
+        "index_failed": not indexed and bool(index_error),
+        "index_error": index_error or None,
         "has_extracted_text": bool(extracted.strip()),
         "text_length": len(extracted),
         "pdf_available": pdf_path is not None,
-        "search_available": bool(extracted.strip()),
+        "search_available": indexed and bool(extracted.strip()),
     }
     if include_text:
         doc["extracted_text"] = extracted
@@ -112,7 +120,9 @@ def _ensure_schema(conn):
             upload_date TEXT NOT NULL,
             created_at TEXT NOT NULL,
             extracted_text TEXT,
-            amm_reference TEXT
+            amm_reference TEXT,
+            indexed INTEGER NOT NULL DEFAULT 0,
+            index_error TEXT
         )
         """
     )
@@ -121,6 +131,19 @@ def _ensure_schema(conn):
         conn.execute("ALTER TABLE amm_documents ADD COLUMN extracted_text TEXT")
     if "amm_reference" not in columns:
         conn.execute("ALTER TABLE amm_documents ADD COLUMN amm_reference TEXT")
+    if "indexed" not in columns:
+        conn.execute("ALTER TABLE amm_documents ADD COLUMN indexed INTEGER NOT NULL DEFAULT 0")
+    if "index_error" not in columns:
+        conn.execute("ALTER TABLE amm_documents ADD COLUMN index_error TEXT")
+
+    conn.execute(
+        """
+        UPDATE amm_documents
+        SET indexed = 1
+        WHERE indexed = 0
+          AND TRIM(COALESCE(extracted_text, '')) != ''
+        """
+    )
 
     conn.executescript(
         """
@@ -227,21 +250,7 @@ def _parse_amm_path_metadata(base_dir, absolute_path):
 def _register_existing_amm_pdf(base_dir, absolute_path, aircraft_type, engine_type,
                                ata_chapter, document_name, revision=""):
     stored_filename = os.path.basename(absolute_path)
-    with open(absolute_path, "rb") as handle:
-        pdf_bytes = handle.read()
-
-    extracted_text = extract_pdf_bytes(pdf_bytes) or extract_pdf_text(absolute_path)
     amm_reference = build_stored_amm_reference(document_name, ata_chapter, revision)
-    if not extracted_text:
-        extracted_text = build_metadata_index_text({
-            "document_name": document_name,
-            "aircraft_type": aircraft_type,
-            "engine_type": engine_type,
-            "ata_chapter": ata_chapter,
-            "amm_reference": amm_reference,
-            "revision": revision,
-            "stored_filename": stored_filename,
-        })
 
     data_root = get_amm_files_root(base_dir)
     if absolute_path.startswith(data_root):
@@ -261,13 +270,13 @@ def _register_existing_amm_pdf(base_dir, absolute_path, aircraft_type, engine_ty
             INSERT INTO amm_documents (
                 aircraft_type, engine_type, ata_chapter, document_name, revision,
                 amm_reference, stored_filename, file_path, upload_date, created_at,
-                extracted_text
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                extracted_text, indexed, index_error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 aircraft_type, engine_type, ata_chapter, document_name, revision,
                 amm_reference, stored_filename, relative_path, upload_date, created_at,
-                extracted_text,
+                None, 0, None,
             ),
         )
         doc_id = cursor.lastrowid
@@ -276,7 +285,7 @@ def _register_existing_amm_pdf(base_dir, absolute_path, aircraft_type, engine_ty
             (doc_id,),
         ).fetchone()
 
-    return _row_to_document(base_dir, row, include_text=True)
+    return _row_to_document(base_dir, row)
 
 
 def import_orphan_amm_pdfs(base_dir):
@@ -331,7 +340,10 @@ def init_amm_storage(base_dir):
         _ensure_schema(conn)
     _migrate_amm_file_locations(base_dir)
     import_orphan_amm_pdfs(base_dir)
-    reindex_all_amm_documents(base_dir, only_missing=True)
+
+    from amm_indexing import schedule_pending_amm_indexing
+
+    schedule_pending_amm_indexing(base_dir)
 
 
 def build_metadata_index_text(row):
@@ -353,75 +365,53 @@ def normalize_index_text(text):
 
 
 def _extract_text_for_row(base_dir, row):
-    """Extract PDF text for a database row, with metadata fallback."""
+    """Extract PDF text for a database row, page by page."""
     document = dict(row)
     absolute = resolve_amm_file_path(base_dir, document)
     if not absolute:
         absolute = _absolute_file_path(base_dir, row["file_path"])
 
-    text = ""
     if absolute and os.path.exists(absolute):
-        text = extract_pdf_text(absolute)
-
-    if not text:
-        text = build_metadata_index_text(document)
-
-    return text
+        return extract_pdf_text(absolute, max_pages=MAX_INDEX_PAGES)
+    return ""
 
 
-def _update_document_text(base_dir, doc_id, extracted_text):
+def _update_document_index(base_dir, doc_id, extracted_text, indexed, index_error=None):
     with get_connection(base_dir) as conn:
         conn.execute(
-            "UPDATE amm_documents SET extracted_text = ? WHERE id = ?",
-            (extracted_text, doc_id),
+            """
+            UPDATE amm_documents
+            SET extracted_text = ?, indexed = ?, index_error = ?
+            WHERE id = ?
+            """,
+            (extracted_text or None, 1 if indexed else 0, index_error, doc_id),
         )
 
 
-def backfill_extracted_text(base_dir):
-    return reindex_all_amm_documents(base_dir, only_missing=True)
+def _update_document_text(base_dir, doc_id, extracted_text):
+    _update_document_index(
+        base_dir,
+        doc_id,
+        extracted_text,
+        indexed=bool((extracted_text or "").strip()),
+        index_error=None if (extracted_text or "").strip() else "No extractable text found",
+    )
 
 
-def reindex_all_amm_documents(base_dir, only_missing=False):
-    """
-    Extract and store text for all AMM documents.
-    Uses PDF text when available, otherwise indexes document metadata.
-    """
-    query = "SELECT * FROM amm_documents"
-    if only_missing:
-        query += " WHERE extracted_text IS NULL OR TRIM(extracted_text) = ''"
-
+def list_unindexed_amm_document_ids(base_dir):
     with get_connection(base_dir) as conn:
-        rows = conn.execute(query).fetchall()
-
-    indexed = 0
-    from_pdf = 0
-    from_metadata = 0
-
-    for row in rows:
-        document = dict(row)
-        absolute = resolve_amm_file_path(base_dir, document)
-        pdf_text = extract_pdf_text(absolute) if absolute else ""
-        if pdf_text:
-            text = pdf_text
-            from_pdf += 1
-        else:
-            text = build_metadata_index_text(document)
-            from_metadata += 1
-
-        if text:
-            _update_document_text(base_dir, row["id"], text)
-            indexed += 1
-
-    return {
-        "total": len(rows),
-        "indexed": indexed,
-        "from_pdf": from_pdf,
-        "from_metadata": from_metadata,
-    }
+        rows = conn.execute(
+            """
+            SELECT id FROM amm_documents
+            WHERE indexed = 0
+            ORDER BY created_at ASC
+            """
+        ).fetchall()
+    return [row[0] for row in rows]
 
 
-def index_amm_document(base_dir, doc_id):
-    """Re-index a single AMM document by id."""
+def extract_and_index_amm_document(base_dir, doc_id):
+    """Extract PDF text page by page and update indexing status."""
     with get_connection(base_dir) as conn:
         row = conn.execute(
             "SELECT * FROM amm_documents WHERE id = ?",
@@ -429,10 +419,56 @@ def index_amm_document(base_dir, doc_id):
         ).fetchone()
     if not row:
         return None
-    text = _extract_text_for_row(base_dir, row)
-    if text:
-        _update_document_text(base_dir, doc_id, text)
-    return get_amm_document(base_dir, doc_id, include_text=True)
+    if row["indexed"]:
+        return get_amm_document(base_dir, doc_id)
+
+    extracted_text = ""
+    index_error = None
+    try:
+        extracted_text = _extract_text_for_row(base_dir, row)
+        if not extracted_text:
+            index_error = "No extractable text found"
+    except Exception as exc:
+        index_error = str(exc)[:500] or "Text extraction failed"
+
+    indexed = bool(extracted_text.strip())
+    _update_document_index(
+        base_dir,
+        doc_id,
+        extracted_text if indexed else None,
+        indexed=indexed,
+        index_error=None if indexed else index_error,
+    )
+    return get_amm_document(base_dir, doc_id, include_text=indexed)
+
+
+def backfill_extracted_text(base_dir):
+    return reindex_all_amm_documents(base_dir, only_missing=True)
+
+
+def reindex_all_amm_documents(base_dir, only_missing=False):
+    """Schedule background indexing for AMM documents."""
+    from amm_indexing import schedule_amm_indexing
+
+    query = "SELECT id FROM amm_documents"
+    if only_missing:
+        query += " WHERE indexed = 0"
+
+    with get_connection(base_dir) as conn:
+        rows = conn.execute(query).fetchall()
+
+    for row in rows:
+        schedule_amm_indexing(base_dir, row[0])
+
+    return {
+        "total": len(rows),
+        "scheduled": len(rows),
+    }
+
+
+def index_amm_document(base_dir, doc_id):
+    """Re-index a single AMM document by id."""
+    return extract_and_index_amm_document(base_dir, doc_id)
 
 
 def save_amm_document(base_dir, aircraft_type, engine_type, ata_chapter,
@@ -463,24 +499,10 @@ def save_amm_document(base_dir, aircraft_type, engine_type, ata_chapter,
     unique_name = f"{uuid.uuid4().hex[:8]}_{safe_base}"
     absolute_path = os.path.join(amm_dir, unique_name)
 
-    pdf_bytes = pdf_file.read()
-    if hasattr(pdf_file, "seek"):
-        pdf_file.seek(0)
     with open(absolute_path, "wb") as handle:
-        handle.write(pdf_bytes)
+        shutil.copyfileobj(pdf_file.stream, handle)
 
-    extracted_text = extract_pdf_bytes(pdf_bytes) or extract_pdf_text(absolute_path)
     amm_reference = build_stored_amm_reference(document_name, ata_chapter, revision)
-    if not extracted_text:
-        extracted_text = build_metadata_index_text({
-            "document_name": document_name,
-            "aircraft_type": aircraft_type,
-            "engine_type": engine_type,
-            "ata_chapter": ata_chapter,
-            "amm_reference": amm_reference,
-            "revision": revision,
-            "stored_filename": unique_name,
-        })
 
     now = datetime.now()
     upload_date = now.strftime("%Y-%m-%d")
@@ -493,13 +515,13 @@ def save_amm_document(base_dir, aircraft_type, engine_type, ata_chapter,
             INSERT INTO amm_documents (
                 aircraft_type, engine_type, ata_chapter, document_name, revision,
                 amm_reference, stored_filename, file_path, upload_date, created_at,
-                extracted_text
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                extracted_text, indexed, index_error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 aircraft_type, engine_type, ata_chapter, document_name, revision,
                 amm_reference, unique_name, relative_path, upload_date, created_at,
-                extracted_text,
+                None, 0, None,
             ),
         )
         doc_id = cursor.lastrowid

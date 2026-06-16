@@ -176,7 +176,7 @@
                     <td>{{ doc.revision or '—' }}</td>
                     <td>{{ doc.upload_date }}</td>
                     <td>{% if doc.pdf_available %}Yes{% else %}Missing{% endif %}</td>
-                    <td>{% if doc.search_available %}Yes{% else %}No{% endif %}</td>
+                    <td>{% if doc.search_available %}Yes{% elif doc.index_pending %}Pending{% else %}No{% endif %}</td>
                     <td class="history-actions">
                         {% if doc.pdf_available %}
                         <a href="{{ url_for('amm_library_download', doc_id=doc.id) }}"
