@@ -33,7 +33,6 @@ from constants import (
 from pdf_generator import generate_borescope_report
 from amm_indexing import schedule_amm_indexing
 from amm_storage import (
-    force_reindex_amm_document,
     get_amm_document,
     init_amm_storage,
     list_amm_documents,
@@ -42,7 +41,6 @@ from amm_storage import (
     search_amm_documents,
     search_amm_reference_results,
 )
-from amm_pdf import get_pdf_page_count
 from ai_service import get_advisory_warning, is_ai_enabled, search_amm_context, suggest_finding_classification
 from report_numbering import allocate_report_number, peek_next_report_number, sync_counter_from_reports
 from report_storage import (
@@ -764,11 +762,26 @@ def amm_library_view(doc_id):
 
 @app.route("/api/amm-documents/<int:doc_id>/reindex", methods=["POST"])
 def api_amm_reindex(doc_id):
+    document = get_amm_document(BASE_DIR, doc_id)
+    if not document:
+        abort(404)
     try:
-        document = force_reindex_amm_document(BASE_DIR, doc_id)
-        if not document:
-            abort(404)
-        return {"document": document, "advisory_warning": get_advisory_warning()}
+        from amm_storage import _update_document_index, INDEX_STATUS_UPLOADED
+
+        _update_document_index(
+            BASE_DIR,
+            doc_id,
+            extracted_text=None,
+            index_status=INDEX_STATUS_UPLOADED,
+            index_error=None,
+        )
+        schedule_amm_indexing(BASE_DIR, doc_id)
+        document = get_amm_document(BASE_DIR, doc_id)
+        return {
+            "document": document,
+            "message": "AMM reindex scheduled in background.",
+            "advisory_warning": get_advisory_warning(),
+        }
     except Exception:
         app.logger.exception("AMM reindex failed for document %s", doc_id)
         return {
