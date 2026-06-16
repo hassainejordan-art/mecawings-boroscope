@@ -58,7 +58,8 @@
                 : '';
             item.innerHTML = `
                 <span class="amm-modal-result-name">${escapeHtml(doc.document_name)}</span>
-                <span class="amm-modal-result-meta">${escapeHtml(doc.aircraft_type)} · ${escapeHtml(doc.engine_type)} · ${escapeHtml(doc.ata_chapter)}${doc.revision ? ' · Rev ' + escapeHtml(doc.revision) : ''}</span>
+                <span class="amm-modal-result-meta">${escapeHtml(doc.amm_reference || doc.document_name)} · ${escapeHtml(doc.engine_type)} · ${escapeHtml(doc.ata_chapter)}</span>
+                ${doc.pdf_available === false ? '<span class="amm-modal-result-meta">PDF unavailable — using stored text</span>' : ''}
                 ${excerpt}
             `;
             item.addEventListener('click', () => selectDocument(doc));

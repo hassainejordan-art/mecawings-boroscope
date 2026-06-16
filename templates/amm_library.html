@@ -15,6 +15,20 @@
     <p>{{ ai_advisory_warning }}</p>
 </div>
 
+{% if show_render_ephemeral_warning %}
+<div class="render-storage-warning" role="alert">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="ai-advisory-icon" aria-hidden="true">
+        <path d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+    </svg>
+    <div>
+        <p><strong>Render storage notice:</strong> {{ render_ephemeral_warning }}</p>
+        {% if not has_persistent_storage %}
+        <p class="field-hint">Set environment variable <code>DATA_DIR=/var/data</code> and attach a Render Disk for persistent AMM storage.</p>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+
 <section class="card">
     <div class="card-header">
         <h2>Upload AMM Document</h2>
@@ -138,9 +152,11 @@
                     <th>Engine Type</th>
                     <th>ATA</th>
                     <th>Document Name</th>
+                    <th>AMM Reference</th>
                     <th>Revision</th>
                     <th>Upload Date</th>
-                    <th>Indexed</th>
+                    <th>PDF</th>
+                    <th>Search</th>
                     <th>Actions</th>
                 </tr>
             </thead>
@@ -156,14 +172,20 @@
                         <p class="amm-text-excerpt">{{ doc.text_excerpt }}</p>
                         {% endif %}
                     </td>
+                    <td>{{ doc.amm_reference or '—' }}</td>
                     <td>{{ doc.revision or '—' }}</td>
                     <td>{{ doc.upload_date }}</td>
-                    <td>{% if doc.has_extracted_text %}Yes{% else %}No{% endif %}</td>
+                    <td>{% if doc.pdf_available %}Yes{% else %}Missing{% endif %}</td>
+                    <td>{% if doc.search_available %}Yes{% else %}No{% endif %}</td>
                     <td class="history-actions">
+                        {% if doc.pdf_available %}
                         <a href="{{ url_for('amm_library_download', doc_id=doc.id) }}"
                            class="btn btn-secondary btn-small">Download</a>
                         <a href="{{ url_for('amm_library_view', doc_id=doc.id) }}" target="_blank" rel="noopener"
                            class="btn btn-secondary btn-small">View</a>
+                        {% else %}
+                        <span class="field-hint">PDF unavailable — search uses stored text</span>
+                        {% endif %}
                     </td>
                 </tr>
                 {% endfor %}

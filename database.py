@@ -3,7 +3,7 @@ import os
 import sqlite3
 from datetime import datetime
 
-DB_FILENAME = "reports.db"
+from storage_config import get_db_path as persistent_db_path
 
 COLUMN_FIELDS = frozenset({
     "report_number",
@@ -23,7 +23,7 @@ COLUMN_FIELDS = frozenset({
 
 
 def get_db_path(base_dir):
-    return os.path.join(base_dir, "data", DB_FILENAME)
+    return persistent_db_path(base_dir)
 
 
 def get_connection(base_dir):

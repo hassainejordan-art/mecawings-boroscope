@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 import sqlite3
 import uuid
 from datetime import datetime
@@ -7,15 +8,10 @@ from datetime import datetime
 from werkzeug.utils import secure_filename
 
 from amm_pdf import extract_pdf_text
+from storage_config import get_amm_files_root, get_db_path
 
-AMM_SUBDIR = "amm"
-DB_FILENAME = "reports.db"
 SNIPPET_MAX_LEN = 320
 SNIPPET_CONTEXT = 140
-
-
-def get_db_path(base_dir):
-    return os.path.join(base_dir, "data", DB_FILENAME)
 
 
 def get_connection(base_dir):
@@ -24,10 +20,6 @@ def get_connection(base_dir):
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     return conn
-
-
-def get_amm_root(base_dir):
-    return os.path.join(base_dir, "static", AMM_SUBDIR)
 
 
 def sanitize_path_part(value, fallback="UNKNOWN"):
@@ -47,10 +39,40 @@ def build_amm_dir(base_dir, aircraft_type, engine_type, ata_chapter):
     aircraft = sanitize_path_part(aircraft_type, "AIRCRAFT")
     engine = sanitize_path_part(engine_type, "ENGINE")
     ata = sanitize_path_part(_extract_ata_code(ata_chapter), "00-00")
-    return os.path.join(get_amm_root(base_dir), aircraft, engine, ata)
+    return os.path.join(get_amm_files_root(base_dir), aircraft, engine, ata)
 
 
-def _row_to_document(row, include_text=False, text_excerpt=None):
+def build_stored_amm_reference(document_name, ata_chapter, revision=""):
+    parts = [(document_name or "").strip(), (ata_chapter or "").strip()]
+    rev = (revision or "").strip()
+    if rev:
+        if not rev.lower().startswith("rev"):
+            rev = f"Rev {rev}"
+        parts.append(rev)
+    return " — ".join(p for p in parts if p)
+
+
+def _absolute_file_path(base_dir, file_path):
+    if not file_path:
+        return None
+    if os.path.isabs(file_path):
+        return file_path
+    return os.path.join(base_dir, file_path)
+
+
+def _legacy_static_amm_root(base_dir):
+    return os.path.join(base_dir, "static", "amm")
+
+
+def _row_to_document(base_dir, row, include_text=False, text_excerpt=None):
+    extracted = row["extracted_text"] or ""
+    pdf_path = resolve_amm_file_path(base_dir, {"file_path": row["file_path"]})
+    amm_reference = row["amm_reference"] if "amm_reference" in row.keys() else ""
+    if not amm_reference:
+        amm_reference = build_stored_amm_reference(
+            row["document_name"], row["ata_chapter"], row["revision"]
+        )
+
     doc = {
         "id": row["id"],
         "aircraft_type": row["aircraft_type"],
@@ -58,55 +80,170 @@ def _row_to_document(row, include_text=False, text_excerpt=None):
         "ata_chapter": row["ata_chapter"],
         "document_name": row["document_name"],
         "revision": row["revision"],
+        "amm_reference": amm_reference,
         "stored_filename": row["stored_filename"],
         "file_path": row["file_path"],
         "upload_date": row["upload_date"],
         "created_at": row["created_at"],
-        "has_extracted_text": bool((row["extracted_text"] or "").strip()),
-        "text_length": len(row["extracted_text"] or ""),
+        "has_extracted_text": bool(extracted.strip()),
+        "text_length": len(extracted),
+        "pdf_available": pdf_path is not None,
+        "search_available": bool(extracted.strip()),
     }
     if include_text:
-        doc["extracted_text"] = row["extracted_text"] or ""
+        doc["extracted_text"] = extracted
     if text_excerpt:
         doc["text_excerpt"] = text_excerpt
     return doc
 
 
-def _ensure_extracted_text_column(conn):
+def _ensure_schema(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS amm_documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            aircraft_type TEXT NOT NULL,
+            engine_type TEXT NOT NULL,
+            ata_chapter TEXT NOT NULL,
+            document_name TEXT NOT NULL,
+            revision TEXT,
+            stored_filename TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            upload_date TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            extracted_text TEXT,
+            amm_reference TEXT
+        )
+        """
+    )
     columns = {row[1] for row in conn.execute("PRAGMA table_info(amm_documents)").fetchall()}
     if "extracted_text" not in columns:
         conn.execute("ALTER TABLE amm_documents ADD COLUMN extracted_text TEXT")
+    if "amm_reference" not in columns:
+        conn.execute("ALTER TABLE amm_documents ADD COLUMN amm_reference TEXT")
+
+    conn.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS idx_amm_aircraft ON amm_documents(aircraft_type);
+        CREATE INDEX IF NOT EXISTS idx_amm_engine ON amm_documents(engine_type);
+        CREATE INDEX IF NOT EXISTS idx_amm_ata ON amm_documents(ata_chapter);
+        CREATE INDEX IF NOT EXISTS idx_amm_document_name ON amm_documents(document_name);
+        CREATE INDEX IF NOT EXISTS idx_amm_upload_date ON amm_documents(upload_date);
+        CREATE INDEX IF NOT EXISTS idx_amm_reference ON amm_documents(amm_reference);
+        """
+    )
+
+    rows = conn.execute(
+        """
+        SELECT id, document_name, ata_chapter, revision
+        FROM amm_documents
+        WHERE amm_reference IS NULL OR TRIM(amm_reference) = ''
+        """
+    ).fetchall()
+    for row in rows:
+        conn.execute(
+            "UPDATE amm_documents SET amm_reference = ? WHERE id = ?",
+            (
+                build_stored_amm_reference(
+                    row["document_name"], row["ata_chapter"], row["revision"]
+                ),
+                row["id"],
+            ),
+        )
+
+
+def _migrate_file_to_persistent(base_dir, row):
+    """Copy legacy/ephemeral PDF paths into persistent amm_files storage."""
+    current_path = resolve_amm_file_path(base_dir, {"file_path": row["file_path"]})
+    if current_path:
+        return row["file_path"]
+
+    candidates = []
+    stored = row["stored_filename"]
+    legacy_root = _legacy_static_amm_root(base_dir)
+    if stored:
+        for root, _, files in os.walk(legacy_root):
+            if stored in files:
+                candidates.append(os.path.join(root, stored))
+
+    old_absolute = _absolute_file_path(base_dir, row["file_path"])
+    if old_absolute and os.path.exists(old_absolute):
+        candidates.insert(0, old_absolute)
+
+    if not candidates:
+        return row["file_path"]
+
+    source = candidates[0]
+    dest_dir = build_amm_dir(
+        base_dir,
+        row["aircraft_type"],
+        row["engine_type"],
+        row["ata_chapter"],
+    )
+    os.makedirs(dest_dir, exist_ok=True)
+    dest_path = os.path.join(dest_dir, os.path.basename(source))
+    if not os.path.exists(dest_path):
+        shutil.copy2(source, dest_path)
+
+    data_dir = get_amm_files_root(base_dir)
+    if dest_path.startswith(data_dir):
+        return os.path.relpath(dest_path, base_dir)
+    return dest_path
+
+
+def _migrate_amm_file_locations(base_dir):
+    with get_connection(base_dir) as conn:
+        rows = conn.execute("SELECT * FROM amm_documents").fetchall()
+        for row in rows:
+            new_path = _migrate_file_to_persistent(base_dir, row)
+            if new_path != row["file_path"]:
+                conn.execute(
+                    "UPDATE amm_documents SET file_path = ? WHERE id = ?",
+                    (new_path, row["id"]),
+                )
 
 
 def init_amm_storage(base_dir):
-    os.makedirs(get_amm_root(base_dir), exist_ok=True)
+    os.makedirs(get_amm_files_root(base_dir), exist_ok=True)
     with get_connection(base_dir) as conn:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS amm_documents (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                aircraft_type TEXT NOT NULL,
-                engine_type TEXT NOT NULL,
-                ata_chapter TEXT NOT NULL,
-                document_name TEXT NOT NULL,
-                revision TEXT,
-                stored_filename TEXT NOT NULL,
-                file_path TEXT NOT NULL UNIQUE,
-                upload_date TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                extracted_text TEXT
-            );
+        _ensure_schema(conn)
+    _migrate_amm_file_locations(base_dir)
+    reindex_all_amm_documents(base_dir, only_missing=True)
 
-            CREATE INDEX IF NOT EXISTS idx_amm_aircraft ON amm_documents(aircraft_type);
-            CREATE INDEX IF NOT EXISTS idx_amm_engine ON amm_documents(engine_type);
-            CREATE INDEX IF NOT EXISTS idx_amm_ata ON amm_documents(ata_chapter);
-            CREATE INDEX IF NOT EXISTS idx_amm_document_name ON amm_documents(document_name);
-            CREATE INDEX IF NOT EXISTS idx_amm_upload_date ON amm_documents(upload_date);
-            """
-        )
-        _ensure_extracted_text_column(conn)
 
-    backfill_extracted_text(base_dir)
+def build_metadata_index_text(row):
+    """Fallback index content when PDF text cannot be extracted."""
+    parts = [
+        row.get("document_name") if isinstance(row, dict) else row["document_name"],
+        row.get("aircraft_type") if isinstance(row, dict) else row["aircraft_type"],
+        row.get("engine_type") if isinstance(row, dict) else row["engine_type"],
+        row.get("ata_chapter") if isinstance(row, dict) else row["ata_chapter"],
+        row.get("amm_reference") if isinstance(row, dict) else row["amm_reference"],
+        row.get("revision") if isinstance(row, dict) else row["revision"],
+        row.get("stored_filename") if isinstance(row, dict) else row["stored_filename"],
+    ]
+    return normalize_index_text("\n".join(str(p).strip() for p in parts if p))
+
+
+def normalize_index_text(text):
+    return (text or "").strip()
+
+
+def _extract_text_for_row(base_dir, row):
+    """Extract PDF text for a database row, with metadata fallback."""
+    document = dict(row)
+    absolute = resolve_amm_file_path(base_dir, document)
+    if not absolute:
+        absolute = _absolute_file_path(base_dir, row["file_path"])
+
+    text = ""
+    if absolute and os.path.exists(absolute):
+        text = extract_pdf_text(absolute)
+
+    if not text:
+        text = build_metadata_index_text(document)
+
+    return text
 
 
 def _update_document_text(base_dir, doc_id, extracted_text):
@@ -118,24 +255,61 @@ def _update_document_text(base_dir, doc_id, extracted_text):
 
 
 def backfill_extracted_text(base_dir):
+    return reindex_all_amm_documents(base_dir, only_missing=True)
+
+
+def reindex_all_amm_documents(base_dir, only_missing=False):
+    """
+    Extract and store text for all AMM documents.
+    Uses PDF text when available, otherwise indexes document metadata.
+    """
+    query = "SELECT * FROM amm_documents"
+    if only_missing:
+        query += " WHERE extracted_text IS NULL OR TRIM(extracted_text) = ''"
+
     with get_connection(base_dir) as conn:
-        rows = conn.execute(
-            """
-            SELECT id, file_path, extracted_text
-            FROM amm_documents
-            WHERE extracted_text IS NULL OR TRIM(extracted_text) = ''
-            """
-        ).fetchall()
+        rows = conn.execute(query).fetchall()
+
+    indexed = 0
+    from_pdf = 0
+    from_metadata = 0
 
     for row in rows:
-        absolute = row["file_path"]
-        if not os.path.isabs(absolute):
-            absolute = os.path.join(base_dir, absolute)
-        if not os.path.exists(absolute):
-            continue
-        text = extract_pdf_text(absolute)
+        document = dict(row)
+        absolute = resolve_amm_file_path(base_dir, document)
+        pdf_text = extract_pdf_text(absolute) if absolute else ""
+        if pdf_text:
+            text = pdf_text
+            from_pdf += 1
+        else:
+            text = build_metadata_index_text(document)
+            from_metadata += 1
+
         if text:
             _update_document_text(base_dir, row["id"], text)
+            indexed += 1
+
+    return {
+        "total": len(rows),
+        "indexed": indexed,
+        "from_pdf": from_pdf,
+        "from_metadata": from_metadata,
+    }
+
+
+def index_amm_document(base_dir, doc_id):
+    """Re-index a single AMM document by id."""
+    with get_connection(base_dir) as conn:
+        row = conn.execute(
+            "SELECT * FROM amm_documents WHERE id = ?",
+            (doc_id,),
+        ).fetchone()
+    if not row:
+        return None
+    text = _extract_text_for_row(base_dir, row)
+    if text:
+        _update_document_text(base_dir, doc_id, text)
+    return get_amm_document(base_dir, doc_id, include_text=True)
 
 
 def save_amm_document(base_dir, aircraft_type, engine_type, ata_chapter,
@@ -165,9 +339,25 @@ def save_amm_document(base_dir, aircraft_type, engine_type, ata_chapter,
 
     unique_name = f"{uuid.uuid4().hex[:8]}_{safe_base}"
     absolute_path = os.path.join(amm_dir, unique_name)
-    pdf_file.save(absolute_path)
 
-    extracted_text = extract_pdf_text(absolute_path)
+    pdf_bytes = pdf_file.read()
+    if hasattr(pdf_file, "seek"):
+        pdf_file.seek(0)
+    with open(absolute_path, "wb") as handle:
+        handle.write(pdf_bytes)
+
+    extracted_text = extract_pdf_bytes(pdf_bytes) or extract_pdf_text(absolute_path)
+    amm_reference = build_stored_amm_reference(document_name, ata_chapter, revision)
+    if not extracted_text:
+        extracted_text = build_metadata_index_text({
+            "document_name": document_name,
+            "aircraft_type": aircraft_type,
+            "engine_type": engine_type,
+            "ata_chapter": ata_chapter,
+            "amm_reference": amm_reference,
+            "revision": revision,
+            "stored_filename": unique_name,
+        })
 
     now = datetime.now()
     upload_date = now.strftime("%Y-%m-%d")
@@ -179,12 +369,14 @@ def save_amm_document(base_dir, aircraft_type, engine_type, ata_chapter,
             """
             INSERT INTO amm_documents (
                 aircraft_type, engine_type, ata_chapter, document_name, revision,
-                stored_filename, file_path, upload_date, created_at, extracted_text
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                amm_reference, stored_filename, file_path, upload_date, created_at,
+                extracted_text
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 aircraft_type, engine_type, ata_chapter, document_name, revision,
-                unique_name, relative_path, upload_date, created_at, extracted_text,
+                amm_reference, unique_name, relative_path, upload_date, created_at,
+                extracted_text,
             ),
         )
         doc_id = cursor.lastrowid
@@ -193,7 +385,7 @@ def save_amm_document(base_dir, aircraft_type, engine_type, ata_chapter,
             (doc_id,),
         ).fetchone()
 
-    return _row_to_document(row)
+    return _row_to_document(base_dir, row)
 
 
 def list_amm_documents(base_dir):
@@ -204,7 +396,7 @@ def list_amm_documents(base_dir):
             ORDER BY upload_date DESC, created_at DESC
             """
         ).fetchall()
-    return [_row_to_document(row) for row in rows]
+    return [_row_to_document(base_dir, row) for row in rows]
 
 
 def _split_text_chunks(text, chunk_size=900):
@@ -295,6 +487,7 @@ def search_amm_snippets(base_dir, query="", engine_type="", ata="", inspected_ar
                 "aircraft_type": doc["aircraft_type"],
                 "engine_type": doc["engine_type"],
                 "ata_chapter": doc["ata_chapter"],
+                "amm_reference": doc.get("amm_reference", ""),
                 "revision": doc.get("revision") or "",
                 "snippet": chunk[:SNIPPET_MAX_LEN] + ("…" if len(chunk) > SNIPPET_MAX_LEN else ""),
                 "score": score,
@@ -316,6 +509,7 @@ def search_amm_documents(base_dir, keyword="", engine_type="", ata_chapter="",
           AND (? = '' OR LOWER(COALESCE(revision, '')) LIKE '%' || LOWER(?) || '%')
           AND (
                 ? = ''
+                OR LOWER(COALESCE(amm_reference, '')) LIKE '%' || LOWER(?) || '%'
                 OR LOWER(COALESCE(document_name, '')) LIKE '%' || LOWER(?) || '%'
                 OR LOWER(COALESCE(revision, '')) LIKE '%' || LOWER(?) || '%'
                 OR LOWER(COALESCE(ata_chapter, '')) LIKE '%' || LOWER(?) || '%'
@@ -323,6 +517,7 @@ def search_amm_documents(base_dir, keyword="", engine_type="", ata_chapter="",
           AND (
                 ? = ''
                 OR LOWER(COALESCE(extracted_text, '')) LIKE '%' || LOWER(?) || '%'
+                OR LOWER(COALESCE(amm_reference, '')) LIKE '%' || LOWER(?) || '%'
                 OR LOWER(COALESCE(document_name, '')) LIKE '%' || LOWER(?) || '%'
                 OR LOWER(COALESCE(ata_chapter, '')) LIKE '%' || LOWER(?) || '%'
                 OR LOWER(COALESCE(engine_type, '')) LIKE '%' || LOWER(?) || '%'
@@ -336,8 +531,8 @@ def search_amm_documents(base_dir, keyword="", engine_type="", ata_chapter="",
         ata_chapter, ata_chapter,
         document_name, document_name,
         revision, revision,
-        amm_reference, amm_reference, amm_reference, amm_reference,
-        keyword, keyword, keyword, keyword, keyword, keyword,
+        amm_reference, amm_reference, amm_reference, amm_reference, amm_reference,
+        keyword, keyword, keyword, keyword, keyword, keyword, keyword,
     )
     terms = _search_terms(keyword, amm_reference)
 
@@ -347,9 +542,12 @@ def search_amm_documents(base_dir, keyword="", engine_type="", ata_chapter="",
     results = []
     for row in rows:
         excerpt = None
+        extracted = row["extracted_text"] or ""
         if keyword or amm_reference:
-            excerpt = extract_text_snippet(row["extracted_text"] or "", terms)
-        results.append(_row_to_document(row, include_text=include_text, text_excerpt=excerpt))
+            excerpt = extract_text_snippet(extracted, terms)
+        results.append(
+            _row_to_document(base_dir, row, include_text=include_text, text_excerpt=excerpt)
+        )
     return results
 
 
@@ -361,7 +559,7 @@ def get_amm_document(base_dir, doc_id, include_text=False):
         ).fetchone()
     if not row:
         return None
-    return _row_to_document(row, include_text=include_text)
+    return _row_to_document(base_dir, row, include_text=include_text)
 
 
 def resolve_amm_file_path(base_dir, document):
@@ -370,20 +568,32 @@ def resolve_amm_file_path(base_dir, document):
     file_path = document.get("file_path")
     if not file_path:
         return None
-    absolute = file_path if os.path.isabs(file_path) else os.path.join(base_dir, file_path)
-    return absolute if os.path.exists(absolute) else None
+
+    candidates = [
+        file_path if os.path.isabs(file_path) else os.path.join(base_dir, file_path),
+        _absolute_file_path(base_dir, file_path),
+    ]
+    stored = document.get("stored_filename")
+    if stored:
+        legacy_root = _legacy_static_amm_root(base_dir)
+        for root, _, files in os.walk(legacy_root):
+            if stored in files:
+                candidates.append(os.path.join(root, stored))
+
+    for absolute in candidates:
+        if absolute and os.path.exists(absolute):
+            return absolute
+    return None
 
 
 def format_amm_reference_label(document, snippet=None):
     if not document:
         return ""
-    parts = [
+    label = document.get("amm_reference") or build_stored_amm_reference(
         document.get("document_name", ""),
         document.get("ata_chapter", ""),
-    ]
-    if document.get("revision"):
-        parts.append(f"Rev {document['revision']}")
-    label = " — ".join(p for p in parts if p)
+        document.get("revision", ""),
+    )
     if snippet:
         label = f"{label}\n{snippet.strip()}"
     return label

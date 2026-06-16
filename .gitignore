@@ -17,6 +17,8 @@ static/reports/*
 !static/reports/.gitkeep
 static/amm/*
 !static/amm/.gitkeep
+data/*
+!data/.gitkeep
 
 # Auto-generated assets
 static/img/logo.png
@@ -24,10 +26,6 @@ static/img/test_upload.jpg
 
 # Logo (add your file locally)
 static/logo/mecawings_logo.png
-
-# Report counter state
-data/report_counter.json
-data/reports.db
 
 # OS / editor
 .DS_Store

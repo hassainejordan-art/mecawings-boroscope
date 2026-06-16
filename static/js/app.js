@@ -119,7 +119,7 @@
 
     function formatAmmReference(doc, snippet) {
         if (!doc) return '';
-        const parts = [doc.document_name, doc.ata_chapter];
+        const parts = [doc.amm_reference || doc.document_name, doc.ata_chapter];
         if (doc.revision) parts.push('Rev ' + doc.revision);
         let label = parts.filter(Boolean).join(' — ');
         if (snippet) label += '\n' + snippet.trim();
@@ -141,6 +141,7 @@
             engine_type: doc.engine_type,
             ata_chapter: doc.ata_chapter,
             document_name: doc.document_name,
+            amm_reference: doc.amm_reference || '',
             revision: doc.revision || '',
         };
         photo.maintenance_data_reference = formatAmmReference(doc, doc.text_excerpt);

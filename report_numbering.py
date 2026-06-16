@@ -3,11 +3,13 @@ import os
 import re
 from datetime import datetime
 
+from storage_config import get_report_counter_path
+
 REPORT_NUMBER_PATTERN = re.compile(r"^MW_(\d{4})_(\d{4})$")
 
 
 def _counter_path(base_dir):
-    return os.path.join(base_dir, "data", "report_counter.json")
+    return get_report_counter_path(base_dir)
 
 
 def _load_counter(path):

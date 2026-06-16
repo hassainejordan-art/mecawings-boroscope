@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: mecawings-boroscope
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
+    envVars:
+      - key: DATA_DIR
+        value: /var/data
+      - key: PYTHON_VERSION
+        value: "3.12.0"
+    disk:
+      name: mecawings-data
+      mountPath: /var/data
+      sizeGB: 1

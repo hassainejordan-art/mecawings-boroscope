@@ -57,6 +57,13 @@ from report_storage import (
     search_reports,
 )
 from signature_utils import save_signature_data_url
+from storage_config import (
+    RENDER_EPHEMERAL_STORAGE_WARNING,
+    ensure_data_dirs,
+    get_data_dir,
+    has_configured_persistent_storage,
+    show_render_ephemeral_warning,
+)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "boro-report-dev-key-change-in-production")
@@ -64,15 +71,13 @@ app.secret_key = os.environ.get("SECRET_KEY", "boro-report-dev-key-change-in-pro
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 REPORTS_FOLDER = get_reports_root(BASE_DIR)
 LOGO_PATH = os.path.join(BASE_DIR, "static", "logo", "mecawings_logo.png")
-DATA_FOLDER = os.path.join(BASE_DIR, "data")
+DATA_FOLDER = get_data_dir(BASE_DIR)
 
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp", "heic", "heif"}
-AMM_FOLDER = os.path.join(BASE_DIR, "static", "amm")
 
 os.makedirs(REPORTS_FOLDER, exist_ok=True)
 os.makedirs(os.path.join(BASE_DIR, "static", "logo"), exist_ok=True)
-os.makedirs(DATA_FOLDER, exist_ok=True)
-os.makedirs(AMM_FOLDER, exist_ok=True)
+ensure_data_dirs(BASE_DIR)
 ensure_storage(BASE_DIR)
 init_amm_storage(BASE_DIR)
 sync_counter_from_reports(BASE_DIR)
@@ -92,6 +97,10 @@ def inject_globals():
         "logo_path_hint": "static/logo/mecawings_logo.png",
         "ai_advisory_warning": get_advisory_warning(),
         "ai_enabled": is_ai_enabled(),
+        "render_ephemeral_warning": RENDER_EPHEMERAL_STORAGE_WARNING,
+        "show_render_ephemeral_warning": show_render_ephemeral_warning(BASE_DIR),
+        "has_persistent_storage": has_configured_persistent_storage(),
+        "data_dir": DATA_FOLDER,
     }
 
 
@@ -713,9 +722,15 @@ def amm_library_upload():
 @app.route("/amm-library/<int:doc_id>/download")
 def amm_library_download(doc_id):
     document = get_amm_document(BASE_DIR, doc_id)
+    if not document:
+        abort(404)
     file_path = resolve_amm_file_path(BASE_DIR, document)
     if not file_path:
-        abort(404)
+        flash(
+            "PDF file is not available on disk. Metadata and extracted text search remain available.",
+            "error",
+        )
+        return redirect(url_for("amm_library"))
     directory = os.path.dirname(file_path)
     filename = os.path.basename(file_path)
     return send_from_directory(directory, filename, as_attachment=True)
@@ -724,9 +739,15 @@ def amm_library_download(doc_id):
 @app.route("/amm-library/<int:doc_id>/view")
 def amm_library_view(doc_id):
     document = get_amm_document(BASE_DIR, doc_id)
+    if not document:
+        abort(404)
     file_path = resolve_amm_file_path(BASE_DIR, document)
     if not file_path:
-        abort(404)
+        flash(
+            "PDF file is not available on disk. Metadata and extracted text search remain available.",
+            "error",
+        )
+        return redirect(url_for("amm_library"))
     directory = os.path.dirname(file_path)
     filename = os.path.basename(file_path)
     return send_from_directory(directory, filename, as_attachment=False)
