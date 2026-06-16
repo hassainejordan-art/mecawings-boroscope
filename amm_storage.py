@@ -21,6 +21,9 @@ INDEX_STATUS_FAILED = "indexing_failed"
 INDEXING_FAILED_USER_MESSAGE = (
     "PDF uploaded but indexing failed. Try a smaller ATA section PDF."
 )
+NOT_INDEXED_USER_MESSAGE = "AMM uploaded but text is not indexed yet."
+
+PAGE_MARKER_RE = re.compile(r"\[\[PAGE:(\d+)\]\]")
 
 
 def get_connection(base_dir):
@@ -643,6 +646,155 @@ def _split_text_chunks(text, chunk_size=900):
         for start in range(0, len(paragraph), chunk_size):
             chunks.append(paragraph[start:start + chunk_size])
     return chunks
+
+
+def _iter_page_sections(text):
+    """Yield (page_number, section_text) from indexed AMM text."""
+    if not text:
+        return
+    if PAGE_MARKER_RE.search(text):
+        current_page = None
+        buffer = []
+        for line in text.split("\n"):
+            match = PAGE_MARKER_RE.fullmatch(line.strip())
+            if match:
+                if buffer:
+                    yield current_page, "\n".join(buffer).strip()
+                current_page = int(match.group(1))
+                buffer = []
+            else:
+                buffer.append(line)
+        if buffer:
+            yield current_page, "\n".join(buffer).strip()
+        return
+    yield None, text
+
+
+def _find_text_hits(text, terms, keyword="", max_hits=3):
+    """Find matching excerpts in extracted text, with page numbers when available."""
+    if not text or not terms:
+        return []
+
+    hits = []
+    for page_number, section in _iter_page_sections(text):
+        if not section:
+            continue
+        lower = section.lower()
+        if not any(term in lower for term in terms):
+            continue
+        score = sum(lower.count(term) for term in terms)
+        if keyword and keyword.lower() in lower:
+            score += 5
+        hits.append({
+            "text_excerpt": extract_text_snippet(section, terms),
+            "page_number": page_number,
+            "score": score,
+        })
+
+    hits.sort(key=lambda item: item["score"], reverse=True)
+    return hits[:max_hits]
+
+
+def _fetch_amm_candidates(base_dir, aircraft_type="", engine_type="",
+                          ata_chapter="", document_name=""):
+    query = """
+        SELECT * FROM amm_documents
+        WHERE (? = '' OR LOWER(COALESCE(aircraft_type, '')) LIKE '%' || LOWER(?) || '%')
+          AND (? = '' OR LOWER(COALESCE(engine_type, '')) LIKE '%' || LOWER(?) || '%')
+          AND (? = '' OR LOWER(COALESCE(ata_chapter, '')) LIKE '%' || LOWER(?) || '%')
+          AND (? = '' OR LOWER(COALESCE(document_name, '')) LIKE '%' || LOWER(?) || '%')
+        ORDER BY upload_date DESC, created_at DESC
+    """
+    params = (
+        aircraft_type, aircraft_type,
+        engine_type, engine_type,
+        ata_chapter, ata_chapter,
+        document_name, document_name,
+    )
+    with get_connection(base_dir) as conn:
+        return conn.execute(query, params).fetchall()
+
+
+def search_amm_reference_results(base_dir, keyword="", ata_chapter="",
+                                 aircraft_type="", engine_type="",
+                                 document_name="", limit=25):
+    """
+    Search AMM documents for the reference picker.
+    Filters by metadata, then matches individual keyword tokens inside extracted text.
+    """
+    rows = _fetch_amm_candidates(
+        base_dir,
+        aircraft_type=aircraft_type,
+        engine_type=engine_type,
+        ata_chapter=ata_chapter,
+        document_name=document_name,
+    )
+    terms = _search_terms(keyword, document_name)
+    results = []
+
+    for row in rows:
+        doc = _row_to_document(base_dir, row)
+        base = {
+            "id": doc["id"],
+            "document_id": doc["id"],
+            "document_name": doc["document_name"],
+            "ata_chapter": doc["ata_chapter"],
+            "aircraft_type": doc["aircraft_type"],
+            "engine_type": doc["engine_type"],
+            "amm_reference": doc["amm_reference"],
+            "revision": doc.get("revision") or "",
+            "index_status": doc["index_status"],
+            "pdf_available": doc["pdf_available"],
+            "not_indexed": not doc["search_available"],
+        }
+
+        if doc["index_pending"] or doc["index_failed"] or not doc["has_extracted_text"]:
+            base["text_excerpt"] = None
+            base["page_number"] = None
+            base["message"] = (
+                NOT_INDEXED_USER_MESSAGE
+                if doc["index_pending"] or not doc["has_extracted_text"]
+                else INDEXING_FAILED_USER_MESSAGE
+            )
+            if keyword and terms:
+                results.append(base)
+            elif not keyword:
+                results.append(base)
+            continue
+
+        extracted = row["extracted_text"] or ""
+        if not keyword or not terms:
+            preview = extract_text_snippet(extracted, terms) or extracted[:SNIPPET_MAX_LEN]
+            if len(extracted) > SNIPPET_MAX_LEN and not preview.endswith("…"):
+                preview = preview + "…"
+            page_number = None
+            for page_num, section in _iter_page_sections(extracted):
+                if section:
+                    page_number = page_num
+                    break
+            results.append({
+                **base,
+                "not_indexed": False,
+                "text_excerpt": preview,
+                "page_number": page_number,
+                "message": None,
+            })
+            continue
+
+        hits = _find_text_hits(extracted, terms, keyword=keyword)
+        if not hits:
+            continue
+        for hit in hits:
+            results.append({
+                **base,
+                "not_indexed": False,
+                "text_excerpt": hit["text_excerpt"],
+                "page_number": hit["page_number"],
+                "message": None,
+            })
+
+    results.sort(key=lambda item: (1 if item.get("not_indexed") else 0,))
+    return results[:limit]
 
 
 def _search_terms(*values):

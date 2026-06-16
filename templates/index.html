@@ -216,7 +216,7 @@
             <h2 id="amm-modal-title">Select AMM Reference</h2>
             <button type="button" id="amm-modal-close" class="btn-icon-only" aria-label="Close">&times;</button>
         </div>
-        <p class="amm-modal-hint">Search by keyword, ATA, engine type, or AMM reference. Filtered by aircraft and engine from Step 1.</p>
+        <p class="amm-modal-hint">Search inside indexed AMM text. Aircraft and engine filters come from Step 1.</p>
         <div class="ai-advisory-banner ai-advisory-banner-compact" role="note">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="ai-advisory-icon" aria-hidden="true">
                 <path d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
@@ -226,19 +226,22 @@
         <div class="form-grid amm-modal-search-grid">
             <div class="form-group form-group-full">
                 <label for="amm-modal-keyword">Keyword</label>
-                <input type="text" id="amm-modal-keyword" placeholder="Search inside AMM text…">
+                <input type="text" id="amm-modal-keyword" placeholder="e.g. HPT, borescope, TASK 72-00-00">
             </div>
             <div class="form-group">
                 <label for="amm-modal-ata">ATA Chapter</label>
                 <input type="text" id="amm-modal-ata" placeholder="72-00">
             </div>
             <div class="form-group">
-                <label for="amm-modal-reference">AMM Reference</label>
-                <input type="text" id="amm-modal-reference" placeholder="Document name or revision">
+                <label for="amm-modal-document-name">Document Name</label>
+                <input type="text" id="amm-modal-document-name" placeholder="AMM">
             </div>
         </div>
+        <div class="amm-modal-search-actions">
+            <button type="button" id="amm-modal-search-btn" class="btn btn-primary">Search AMM</button>
+        </div>
         <div id="amm-modal-results" class="amm-modal-results"></div>
-        <p id="amm-modal-empty" class="amm-modal-empty" hidden>No matching AMM documents. Upload references in the AMM Library.</p>
+        <p id="amm-modal-empty" class="amm-modal-empty" hidden>No matching AMM documents. Upload references in the AMM Library or adjust your search.</p>
         <div class="amm-modal-footer">
             <button type="button" id="amm-modal-cancel" class="btn btn-secondary">Cancel</button>
         </div>

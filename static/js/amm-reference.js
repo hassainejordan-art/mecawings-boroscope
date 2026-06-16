@@ -6,7 +6,8 @@
 
     const keywordInput = document.getElementById('amm-modal-keyword');
     const ataInput = document.getElementById('amm-modal-ata');
-    const referenceInput = document.getElementById('amm-modal-reference');
+    const documentNameInput = document.getElementById('amm-modal-document-name');
+    const searchBtn = document.getElementById('amm-modal-search-btn');
     const resultsEl = document.getElementById('amm-modal-results');
     const emptyEl = document.getElementById('amm-modal-empty');
     const closeBtn = document.getElementById('amm-modal-close');
@@ -15,7 +16,6 @@
 
     let onSelectCallback = null;
     let pickerContext = {};
-    let searchTimer = null;
 
     function escapeHtml(value) {
         return String(value || '')
@@ -45,52 +45,82 @@
         return { aircraft_type: aircraftType, engine_type: engineType };
     }
 
-    function renderResults(documents) {
-        resultsEl.innerHTML = '';
-        emptyEl.hidden = documents.length > 0;
+    function defaultKeywordFromArea(area) {
+        if (!area) return '';
+        const match = String(area).match(/[A-Za-z0-9]{2,}/);
+        return match ? match[0] : area;
+    }
 
-        documents.forEach((doc) => {
-            const item = document.createElement('button');
-            item.type = 'button';
+    function renderResults(results) {
+        resultsEl.innerHTML = '';
+        emptyEl.hidden = results.length > 0;
+        if (!results.length) {
+            emptyEl.textContent = 'No matching AMM documents. Upload references in the AMM Library or adjust your search.';
+        }
+
+        results.forEach((result) => {
+            const item = document.createElement('article');
             item.className = 'amm-modal-result';
-            const excerpt = doc.text_excerpt
-                ? `<span class="amm-modal-result-excerpt">${escapeHtml(doc.text_excerpt)}</span>`
+
+            const pageLabel = result.page_number
+                ? `<span class="amm-modal-result-meta">Page ${escapeHtml(result.page_number)}</span>`
                 : '';
+
+            const excerpt = result.text_excerpt
+                ? `<p class="amm-modal-result-excerpt">${escapeHtml(result.text_excerpt)}</p>`
+                : '';
+
+            const statusMessage = result.message
+                ? `<p class="amm-modal-result-status">${escapeHtml(result.message)}</p>`
+                : '';
+
             item.innerHTML = `
-                <span class="amm-modal-result-name">${escapeHtml(doc.document_name)}</span>
-                <span class="amm-modal-result-meta">${escapeHtml(doc.amm_reference || doc.document_name)} · ${escapeHtml(doc.engine_type)} · ${escapeHtml(doc.ata_chapter)}</span>
-                ${doc.pdf_available === false ? '<span class="amm-modal-result-meta">PDF unavailable — using stored text</span>' : ''}
+                <div class="amm-modal-result-header">
+                    <span class="amm-modal-result-name">${escapeHtml(result.document_name)}</span>
+                    <span class="amm-modal-result-meta">${escapeHtml(result.ata_chapter)}</span>
+                </div>
+                ${pageLabel}
                 ${excerpt}
+                ${statusMessage}
             `;
-            item.addEventListener('click', () => selectDocument(doc));
+
+            if (!result.not_indexed && result.text_excerpt) {
+                const useBtn = document.createElement('button');
+                useBtn.type = 'button';
+                useBtn.className = 'btn btn-secondary btn-small amm-modal-use-btn';
+                useBtn.textContent = 'Use this reference';
+                useBtn.addEventListener('click', () => selectResult(result));
+                item.appendChild(useBtn);
+            }
+
             resultsEl.appendChild(item);
         });
     }
 
-    function fetchDocuments() {
+    function runSearch() {
         const ctx = getReportContext();
         const params = new URLSearchParams();
         if (ctx.aircraft_type) params.set('aircraft_type', ctx.aircraft_type);
         if (ctx.engine_type) params.set('engine_type', ctx.engine_type);
-        const keyword = keywordInput ? keywordInput.value.trim() : '';
-        const combinedKeyword = [keyword, pickerContext.inspected_area].filter(Boolean).join(' ');
-        if (combinedKeyword) params.set('keyword', combinedKeyword);
-        if (ataInput && ataInput.value.trim()) params.set('ata_chapter', ataInput.value.trim());
-        if (referenceInput && referenceInput.value.trim()) params.set('amm_reference', referenceInput.value.trim());
 
-        fetch('/api/amm-documents?' + params.toString())
+        const keyword = keywordInput ? keywordInput.value.trim() : '';
+        if (keyword) params.set('keyword', keyword);
+        if (ataInput && ataInput.value.trim()) params.set('ata_chapter', ataInput.value.trim());
+        if (documentNameInput && documentNameInput.value.trim()) {
+            params.set('document_name', documentNameInput.value.trim());
+        }
+
+        resultsEl.innerHTML = '<p class="amm-modal-empty">Searching…</p>';
+        emptyEl.hidden = true;
+
+        fetch('/api/amm-search?' + params.toString())
             .then((res) => res.json())
-            .then((data) => renderResults(data.documents || []))
+            .then((data) => renderResults(data.results || []))
             .catch(() => {
                 resultsEl.innerHTML = '';
                 emptyEl.hidden = false;
-                emptyEl.textContent = 'Unable to load AMM documents.';
+                emptyEl.textContent = 'Unable to search AMM documents.';
             });
-    }
-
-    function scheduleSearch() {
-        clearTimeout(searchTimer);
-        searchTimer = setTimeout(fetchDocuments, 250);
     }
 
     function openModal(photoId, callback, context) {
@@ -99,12 +129,13 @@
         modal.hidden = false;
         document.body.classList.add('modal-open');
         if (keywordInput) {
-            keywordInput.value = pickerContext.inspected_area || '';
+            keywordInput.value = defaultKeywordFromArea(pickerContext.inspected_area);
             keywordInput.focus();
         }
         if (ataInput) ataInput.value = '';
-        if (referenceInput) referenceInput.value = '';
-        fetchDocuments();
+        if (documentNameInput) documentNameInput.value = '';
+        resultsEl.innerHTML = '';
+        emptyEl.hidden = true;
     }
 
     function closeModal() {
@@ -114,13 +145,17 @@
         pickerContext = {};
     }
 
-    function selectDocument(doc) {
-        if (onSelectCallback) onSelectCallback(doc);
+    function selectResult(result) {
+        if (onSelectCallback) onSelectCallback(result);
         closeModal();
     }
 
-    [keywordInput, ataInput, referenceInput].forEach((input) => {
-        if (input) input.addEventListener('input', scheduleSearch);
+    searchBtn && searchBtn.addEventListener('click', runSearch);
+    keywordInput && keywordInput.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            runSearch();
+        }
     });
 
     closeBtn && closeBtn.addEventListener('click', closeModal);

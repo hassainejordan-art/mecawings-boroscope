@@ -117,11 +117,12 @@
             + (card.dataset.existing === '1' ? ' photo-card-existing' : '');
     }
 
-    function formatAmmReference(doc, snippet) {
+    function formatAmmReference(doc, snippet, pageNumber) {
         if (!doc) return '';
         const parts = [doc.amm_reference || doc.document_name, doc.ata_chapter];
         if (doc.revision) parts.push('Rev ' + doc.revision);
         let label = parts.filter(Boolean).join(' — ');
+        if (pageNumber) label += '\nPage ' + pageNumber;
         if (snippet) label += '\n' + snippet.trim();
         return label;
     }
@@ -144,7 +145,11 @@
             amm_reference: doc.amm_reference || '',
             revision: doc.revision || '',
         };
-        photo.maintenance_data_reference = formatAmmReference(doc, doc.text_excerpt);
+        photo.maintenance_data_reference = formatAmmReference(
+            doc,
+            doc.text_excerpt,
+            doc.page_number
+        );
         updateMaintenanceReferenceField(card, photo);
         syncMeta();
     }

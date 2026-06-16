@@ -39,6 +39,7 @@ from amm_storage import (
     resolve_amm_file_path,
     save_amm_document,
     search_amm_documents,
+    search_amm_reference_results,
 )
 from ai_service import get_advisory_warning, is_ai_enabled, search_amm_context, suggest_finding_classification
 from report_numbering import allocate_report_number, peek_next_report_number, sync_counter_from_reports
@@ -757,6 +758,22 @@ def amm_library_view(doc_id):
     directory = os.path.dirname(file_path)
     filename = os.path.basename(file_path)
     return send_from_directory(directory, filename, as_attachment=False)
+
+
+@app.route("/api/amm-search", methods=["GET"])
+def api_amm_search():
+    results = search_amm_reference_results(
+        BASE_DIR,
+        keyword=request.args.get("keyword", "").strip(),
+        ata_chapter=request.args.get("ata_chapter", "").strip(),
+        aircraft_type=request.args.get("aircraft_type", "").strip(),
+        engine_type=request.args.get("engine_type", "").strip(),
+        document_name=request.args.get("document_name", "").strip(),
+    )
+    return {
+        "results": results,
+        "advisory_warning": get_advisory_warning(),
+    }
 
 
 @app.route("/api/amm-documents", methods=["GET"])

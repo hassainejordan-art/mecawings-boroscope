@@ -9,6 +9,8 @@ import tempfile
 MAX_INDEX_PAGES = 300
 GC_EVERY_N_PAGES = 10
 EXTRACTION_TIMEOUT_SECONDS = 600
+PAGE_MARKER_PREFIX = "[[PAGE:"
+PAGE_MARKER_SUFFIX = "]]"
 
 
 def normalize_extracted_text(text):
@@ -20,6 +22,10 @@ def normalize_extracted_text(text):
     return text.strip()
 
 
+def format_page_marker(page_number):
+    return f"{PAGE_MARKER_PREFIX}{page_number}{PAGE_MARKER_SUFFIX}"
+
+
 def _extract_pages(reader, max_pages=MAX_INDEX_PAGES):
     """Extract text one page at a time to limit peak memory."""
     chunks = []
@@ -28,7 +34,7 @@ def _extract_pages(reader, max_pages=MAX_INDEX_PAGES):
         try:
             page_text = reader.pages[index].extract_text() or ""
             if page_text.strip():
-                chunks.append(page_text)
+                chunks.append(f"{format_page_marker(index + 1)}\n{page_text}")
         except Exception:
             continue
         if index % GC_EVERY_N_PAGES == 0:
