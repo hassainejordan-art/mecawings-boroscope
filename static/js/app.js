@@ -70,12 +70,18 @@
     }
 
     function photoMetaPayload(p) {
-        return {
+        const payload = {
             area: p.area,
             defect_category: p.defect_category,
             comment: p.comment,
             classification: p.classification,
         };
+        if (p.amm_reference_id) {
+            payload.amm_reference_id = p.amm_reference_id;
+            payload.amm_reference_label = p.amm_reference_label;
+            payload.amm_reference = p.amm_reference;
+        }
+        return payload;
     }
 
     function syncMeta() {
@@ -108,6 +114,53 @@
             + (card.dataset.existing === '1' ? ' photo-card-existing' : '');
     }
 
+    function formatAmmReference(doc) {
+        if (!doc) return '';
+        const parts = [doc.document_name, doc.ata_chapter];
+        if (doc.revision) parts.push('Rev ' + doc.revision);
+        return parts.filter(Boolean).join(' — ');
+    }
+
+    function updateAmmReferenceDisplay(card, photo) {
+        const label = card.querySelector('.amm-reference-label');
+        const clearBtn = card.querySelector('.btn-clear-amm');
+        if (!label) return;
+
+        if (photo.amm_reference_label) {
+            label.textContent = photo.amm_reference_label;
+            label.hidden = false;
+            if (clearBtn) clearBtn.hidden = false;
+        } else {
+            label.textContent = '';
+            label.hidden = true;
+            if (clearBtn) clearBtn.hidden = true;
+        }
+    }
+
+    function setAmmReference(photo, card, doc) {
+        if (!doc) return;
+        photo.amm_reference_id = doc.id;
+        photo.amm_reference_label = formatAmmReference(doc);
+        photo.amm_reference = {
+            id: doc.id,
+            aircraft_type: doc.aircraft_type,
+            engine_type: doc.engine_type,
+            ata_chapter: doc.ata_chapter,
+            document_name: doc.document_name,
+            revision: doc.revision || '',
+        };
+        updateAmmReferenceDisplay(card, photo);
+        syncMeta();
+    }
+
+    function clearAmmReference(photo, card) {
+        delete photo.amm_reference_id;
+        delete photo.amm_reference_label;
+        delete photo.amm_reference;
+        updateAmmReferenceDisplay(card, photo);
+        syncMeta();
+    }
+
     function createPhotoCard(photo) {
         const card = document.createElement('article');
         card.className = `photo-card classification-${photo.classification.toLowerCase()}`
@@ -138,6 +191,14 @@
                     <label>Comment</label>
                     <textarea class="comment-input" placeholder="Inspection comment…" rows="2">${photo.comment || ''}</textarea>
                 </div>
+                <div class="amm-reference-section">
+                    <div class="amm-reference-header">
+                        <label>AMM Reference</label>
+                        <button type="button" class="btn btn-secondary btn-small btn-use-amm">Use AMM Reference</button>
+                    </div>
+                    <p class="amm-reference-label"${photo.amm_reference_label ? '' : ' hidden'}>${photo.amm_reference_label || ''}</p>
+                    <button type="button" class="btn-link btn-clear-amm"${photo.amm_reference_label ? '' : ' hidden'}>Clear reference</button>
+                </div>
                 <div class="photo-card-actions">
                     <div class="form-group form-group-inline">
                         <label>Classification</label>
@@ -162,8 +223,17 @@
         const classificationSelect = card.querySelector('.classification-select');
         const removeBtn = card.querySelector('.btn-remove');
         const badge = card.querySelector('.classification-badge');
+        const useAmmBtn = card.querySelector('.btn-use-amm');
+        const clearAmmBtn = card.querySelector('.btn-clear-amm');
 
         classificationSelect.value = photo.classification;
+
+        useAmmBtn.addEventListener('click', () => {
+            if (window.AmmReferencePicker) {
+                window.AmmReferencePicker.open(photo.id, (doc) => setAmmReference(photo, card, doc));
+            }
+        });
+        clearAmmBtn.addEventListener('click', () => clearAmmReference(photo, card));
 
         areaSelect.addEventListener('change', () => { photo.area = areaSelect.value; syncMeta(); });
         categorySelect.addEventListener('change', () => { photo.defect_category = categorySelect.value; syncMeta(); });
@@ -184,12 +254,18 @@
     }
 
     function normalizeExistingPhoto(data) {
-        return {
+        const norm = {
             area: data.area || INSPECTION_AREAS[0],
             defect_category: data.defect_category || DEFECT_CATEGORIES[0],
             comment: data.comment || data.defect_description || '',
             classification: data.classification || data.severity || 'Acceptable',
         };
+        if (data.amm_reference_id) {
+            norm.amm_reference_id = data.amm_reference_id;
+            norm.amm_reference_label = data.amm_reference_label || '';
+            norm.amm_reference = data.amm_reference || null;
+        }
+        return norm;
     }
 
     function addExistingPhoto(data) {

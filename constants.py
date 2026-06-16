@@ -128,3 +128,55 @@ CERTIFICATION_TEXT = (
     "I certify that this borescope inspection has been performed in accordance "
     "with applicable maintenance data and company procedures."
 )
+
+AI_ADVISORY_WARNING = (
+    "AI suggestions are advisory only. Final assessment must be validated "
+    "using approved maintenance data."
+)
+
+ATA_CHAPTERS = [
+    "05-00 — Time Limits / Maintenance Checks",
+    "06-00 — Dimensions and Areas",
+    "07-00 — Lifting and Shoring",
+    "08-00 — Leveling and Weighing",
+    "09-00 — Towing and Taxiing",
+    "10-00 — Parking, Mooring, Storage",
+    "11-00 — Placards and Markings",
+    "12-00 — Servicing",
+    "20-00 — Standard Practices — Airframe",
+    "21-00 — Air Conditioning",
+    "24-00 — Electrical Power",
+    "25-00 — Equipment / Furnishings",
+    "26-00 — Fire Protection",
+    "27-00 — Flight Controls",
+    "28-00 — Fuel",
+    "29-00 — Hydraulic Power",
+    "30-00 — Ice and Rain Protection",
+    "32-00 — Landing Gear",
+    "33-00 — Lights",
+    "34-00 — Navigation",
+    "36-00 — Pneumatic",
+    "38-00 — Water / Waste",
+    "49-00 — Airborne Auxiliary Power",
+    "52-00 — Doors",
+    "53-00 — Fuselage",
+    "54-00 — Nacelles / Pylons",
+    "55-00 — Stabilizers",
+    "56-00 — Windows",
+    "57-00 — Wings",
+    "70-00 — Standard Practices — Engine",
+    "71-00 — Power Plant",
+    "72-00 — Engine — General",
+    "73-00 — Engine Fuel and Control",
+    "74-00 — Ignition",
+    "75-00 — Bleed Air",
+    "76-00 — Engine Controls",
+    "77-00 — Engine Indicating",
+    "78-00 — Exhaust",
+    "79-00 — Oil",
+    "80-00 — Starting",
+    "81-00 — Turbines (Reciprocating)",
+    "82-00 — Water Injection",
+    "83-00 — Accessory Gearboxes",
+    "84-00 — Propulsion Augmentation",
+]

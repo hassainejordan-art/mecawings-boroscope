@@ -15,7 +15,9 @@ from flask import (
 from werkzeug.utils import secure_filename
 
 from constants import (
+    AI_ADVISORY_WARNING,
     AIRCRAFT_TYPES,
+    ATA_CHAPTERS,
     CERTIFICATION_TEXT,
     CLASSIFICATION_LEVELS,
     CUSTOM_OPTION,
@@ -29,18 +31,28 @@ from constants import (
     SEVERITY_LEVELS,
 )
 from pdf_generator import generate_borescope_report
+from amm_storage import (
+    get_amm_document,
+    init_amm_storage,
+    list_amm_documents,
+    resolve_amm_file_path,
+    save_amm_document,
+    search_amm_documents,
+)
+from ai_service import get_advisory_warning, is_ai_enabled, suggest_finding_classification
 from report_numbering import allocate_report_number, peek_next_report_number, sync_counter_from_reports
 from report_storage import (
     build_folder_name,
+    ensure_storage,
     find_report_dir,
     get_pdf_path,
     get_photos_dir,
     get_report_dir,
     get_reports_root,
-    list_all_reports,
     load_metadata,
     pdf_filename_for,
     photo_paths_for_metadata,
+    resolve_pdf_path,
     save_metadata,
     search_reports,
 )
@@ -55,13 +67,17 @@ LOGO_PATH = os.path.join(BASE_DIR, "static", "logo", "mecawings_logo.png")
 DATA_FOLDER = os.path.join(BASE_DIR, "data")
 
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp", "heic", "heif"}
+AMM_FOLDER = os.path.join(BASE_DIR, "static", "amm")
 
 os.makedirs(REPORTS_FOLDER, exist_ok=True)
 os.makedirs(os.path.join(BASE_DIR, "static", "logo"), exist_ok=True)
 os.makedirs(DATA_FOLDER, exist_ok=True)
+os.makedirs(AMM_FOLDER, exist_ok=True)
+ensure_storage(BASE_DIR)
+init_amm_storage(BASE_DIR)
 sync_counter_from_reports(BASE_DIR)
 
-app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB
+app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100 MB (AMM PDF uploads)
 
 
 def logo_exists():
@@ -74,6 +90,8 @@ def inject_globals():
         "logo_url": url_for("static", filename="logo/mecawings_logo.png") if logo_exists() else None,
         "logo_missing": not logo_exists(),
         "logo_path_hint": "static/logo/mecawings_logo.png",
+        "ai_advisory_warning": get_advisory_warning(),
+        "ai_enabled": is_ai_enabled(),
     }
 
 
@@ -123,7 +141,7 @@ def normalize_photo_meta(meta):
 
     comment = meta.get("comment") or meta.get("defect_description", "")
 
-    return {
+    result = {
         "area": area,
         "defect_category": defect_category,
         "comment": comment.strip(),
@@ -131,6 +149,13 @@ def normalize_photo_meta(meta):
         "severity": classification,
         "defect_description": comment.strip(),
     }
+
+    if meta.get("amm_reference_id"):
+        result["amm_reference_id"] = meta.get("amm_reference_id")
+        result["amm_reference_label"] = meta.get("amm_reference_label", "")
+        result["amm_reference"] = meta.get("amm_reference")
+
+    return result
 
 
 def _classification_counts(photos):
@@ -175,6 +200,7 @@ def _build_report_form_context(edit_report=None, edit_folder=None):
         "engine_state": engine_state,
         "selected_inspected_areas": report.get("inspected_areas", []),
         "custom_option": CUSTOM_OPTION,
+        "ai_advisory_warning": get_advisory_warning(),
     }
 
     if edit_report:
@@ -229,7 +255,7 @@ def _save_photos_to_folder(photos_dir, uploaded_files, photos_meta, start_index=
         photo_file.save(save_path)
 
         meta = normalize_photo_meta(photos_meta[file_index] if file_index < len(photos_meta) else {})
-        entries.append({
+        entry = {
             "filename": original_name,
             "stored_name": unique_name,
             "path": save_path,
@@ -239,7 +265,12 @@ def _save_photos_to_folder(photos_dir, uploaded_files, photos_meta, start_index=
             "classification": meta["classification"],
             "severity": meta["classification"],
             "defect_description": meta["comment"],
-        })
+        }
+        if meta.get("amm_reference_id"):
+            entry["amm_reference_id"] = meta["amm_reference_id"]
+            entry["amm_reference_label"] = meta.get("amm_reference_label", "")
+            entry["amm_reference"] = meta.get("amm_reference")
+        entries.append(entry)
         file_index += 1
 
     return entries
@@ -253,7 +284,7 @@ def _merge_existing_photos(existing_meta, photos_dir):
         if not os.path.exists(path):
             continue
         normalized = normalize_photo_meta(photo)
-        entries.append({
+        entry = {
             "filename": photo.get("filename", stored),
             "stored_name": stored,
             "path": path,
@@ -263,7 +294,12 @@ def _merge_existing_photos(existing_meta, photos_dir):
             "classification": normalized["classification"],
             "severity": normalized["classification"],
             "defect_description": normalized["comment"],
-        })
+        }
+        if normalized.get("amm_reference_id"):
+            entry["amm_reference_id"] = normalized["amm_reference_id"]
+            entry["amm_reference_label"] = normalized.get("amm_reference_label", "")
+            entry["amm_reference"] = normalized.get("amm_reference")
+        entries.append(entry)
     return entries
 
 
@@ -300,15 +336,21 @@ def save_report(folder_name, report_data, photo_entries, signature_path=None, is
                 "classification": p["classification"],
                 "severity": p["classification"],
                 "defect_description": p["comment"],
+                **({
+                    "amm_reference_id": p["amm_reference_id"],
+                    "amm_reference_label": p.get("amm_reference_label", ""),
+                    "amm_reference": p.get("amm_reference"),
+                } if p.get("amm_reference_id") else {}),
             }
             for p in photo_entries
         ],
     }
 
-    save_metadata(report_dir, metadata)
-
-    pdf_photos = [
-        {
+    pdf_photos = []
+    for p in photo_entries:
+        if not p.get("path") or not os.path.exists(p["path"]):
+            continue
+        photo_payload = {
             "path": p["path"],
             "filename": p["filename"],
             "area": p["area"],
@@ -318,9 +360,11 @@ def save_report(folder_name, report_data, photo_entries, signature_path=None, is
             "severity": p["classification"],
             "defect_description": p["comment"],
         }
-        for p in photo_entries
-        if p.get("path") and os.path.exists(p["path"])
-    ]
+        if p.get("amm_reference_id"):
+            photo_payload["amm_reference_id"] = p["amm_reference_id"]
+            photo_payload["amm_reference_label"] = p.get("amm_reference_label", "")
+            photo_payload["amm_reference"] = p.get("amm_reference")
+        pdf_photos.append(photo_payload)
 
     pdf_path = os.path.join(report_dir, pdf_filename_for(report_data["report_number"]))
     generate_borescope_report(
@@ -330,6 +374,8 @@ def save_report(folder_name, report_data, photo_entries, signature_path=None, is
         logo_path=LOGO_PATH,
         signature_path=signature_path,
     )
+
+    save_metadata(BASE_DIR, report_dir, metadata, pdf_path=pdf_path)
 
     return pdf_path, metadata
 
@@ -351,8 +397,7 @@ def history():
 
     for report in results:
         folder = report.get("folder_name") or report.get("report_number")
-        report_dir = find_report_dir(BASE_DIR, folder)
-        pdf_path = get_pdf_path(report_dir, report.get("report_number", "")) if report_dir else None
+        pdf_path = resolve_pdf_path(BASE_DIR, report)
         report["pdf_filename"] = os.path.basename(pdf_path) if pdf_path else None
         report["folder_name"] = folder
 
@@ -376,7 +421,7 @@ def edit_report(folder_name):
         flash("Report not found.", "error")
         return redirect(url_for("history"))
 
-    metadata = load_metadata(report_dir)
+    metadata = load_metadata(BASE_DIR, report_dir)
     if not metadata:
         flash("Report data not found.", "error")
         return redirect(url_for("history"))
@@ -397,7 +442,7 @@ def submit_report():
         if not report_dir:
             flash("Original report not found.", "error")
             return redirect(url_for("history"))
-        existing_meta = load_metadata(report_dir)
+        existing_meta = load_metadata(BASE_DIR, report_dir)
         report_number = existing_meta.get("report_number")
         folder_name = existing_meta.get("folder_name") or os.path.basename(report_dir)
         created_at = existing_meta.get("created_at")
@@ -556,8 +601,8 @@ def view_report(report_key):
     if not report_dir:
         abort(404)
 
-    metadata = load_metadata(report_dir)
-    pdf_path = get_pdf_path(report_dir, metadata.get("report_number", ""))
+    metadata = load_metadata(BASE_DIR, report_dir)
+    pdf_path = resolve_pdf_path(BASE_DIR, metadata)
     folder_name = metadata.get("folder_name") or os.path.basename(report_dir)
 
     photos = _photos_for_display(metadata.get("photos", []))
@@ -580,6 +625,106 @@ def view_report(report_key):
         active_page="new",
         updated=False,
     )
+
+
+@app.route("/amm-library", methods=["GET"])
+def amm_library():
+    search = {
+        "aircraft_type": request.args.get("aircraft_type", "").strip(),
+        "engine_type": request.args.get("engine_type", "").strip(),
+        "ata_chapter": request.args.get("ata_chapter", "").strip(),
+        "document_name": request.args.get("document_name", "").strip(),
+        "revision": request.args.get("revision", "").strip(),
+    }
+    has_search = any(search.values())
+    results = search_amm_documents(BASE_DIR, **search) if has_search else list_amm_documents(BASE_DIR)
+
+    return render_template(
+        "amm_library.html",
+        results=results,
+        search=search,
+        aircraft_types=AIRCRAFT_TYPES,
+        engine_type_groups=ENGINE_TYPE_GROUPS,
+        ata_chapters=ATA_CHAPTERS,
+        custom_option=CUSTOM_OPTION,
+        active_page="amm",
+    )
+
+
+@app.route("/amm-library/upload", methods=["POST"])
+def amm_library_upload():
+    aircraft_type = _resolve_preset_field(
+        request.form.get("aircraft_type"),
+        request.form.get("aircraft_custom"),
+    )
+    engine_type = _resolve_preset_field(
+        request.form.get("engine_type"),
+        request.form.get("engine_custom"),
+    )
+
+    try:
+        save_amm_document(
+            BASE_DIR,
+            aircraft_type=aircraft_type,
+            engine_type=engine_type,
+            ata_chapter=request.form.get("ata_chapter", "").strip(),
+            document_name=request.form.get("document_name", "").strip(),
+            revision=request.form.get("revision", "").strip(),
+            pdf_file=request.files.get("amm_pdf"),
+        )
+        flash("AMM document uploaded successfully.", "success")
+    except ValueError as exc:
+        flash(str(exc), "error")
+    except Exception:
+        flash("Failed to upload AMM document.", "error")
+
+    return redirect(url_for("amm_library"))
+
+
+@app.route("/amm-library/<int:doc_id>/download")
+def amm_library_download(doc_id):
+    document = get_amm_document(BASE_DIR, doc_id)
+    file_path = resolve_amm_file_path(BASE_DIR, document)
+    if not file_path:
+        abort(404)
+    directory = os.path.dirname(file_path)
+    filename = os.path.basename(file_path)
+    return send_from_directory(directory, filename, as_attachment=True)
+
+
+@app.route("/amm-library/<int:doc_id>/view")
+def amm_library_view(doc_id):
+    document = get_amm_document(BASE_DIR, doc_id)
+    file_path = resolve_amm_file_path(BASE_DIR, document)
+    if not file_path:
+        abort(404)
+    directory = os.path.dirname(file_path)
+    filename = os.path.basename(file_path)
+    return send_from_directory(directory, filename, as_attachment=False)
+
+
+@app.route("/api/amm-documents", methods=["GET"])
+def api_amm_documents():
+    documents = search_amm_documents(
+        BASE_DIR,
+        aircraft_type=request.args.get("aircraft_type", "").strip(),
+        engine_type=request.args.get("engine_type", "").strip(),
+        ata_chapter=request.args.get("ata_chapter", "").strip(),
+        document_name=request.args.get("document_name", "").strip(),
+        revision=request.args.get("revision", "").strip(),
+    )
+    return {"documents": documents, "advisory_warning": get_advisory_warning()}
+
+
+@app.route("/api/ai/suggest-finding", methods=["POST"])
+def api_ai_suggest_finding():
+    """Future AI endpoint — returns advisory-only placeholder until enabled."""
+    payload = request.get_json(silent=True) or {}
+    suggestion = suggest_finding_classification(
+        finding_context=payload.get("finding"),
+        amm_reference=payload.get("amm_reference"),
+    )
+    return suggestion
 
 
 if __name__ == "__main__":

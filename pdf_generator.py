@@ -110,6 +110,19 @@ def _get_area(photo):
     return photo.get("area", "—")
 
 
+def _get_amm_reference(photo):
+    label = (photo.get("amm_reference_label") or "").strip()
+    if label:
+        return label
+    ref = photo.get("amm_reference") or {}
+    if not ref:
+        return ""
+    parts = [ref.get("document_name"), ref.get("ata_chapter")]
+    if ref.get("revision"):
+        parts.append(f"Rev {ref['revision']}")
+    return " — ".join(p for p in parts if p)
+
+
 def _severity_counts(photos):
     counts = {"Acceptable": 0, "Monitor": 0, "Reject": 0}
     for photo in photos:
@@ -339,21 +352,23 @@ def _summary_page(counts, total, sty):
 
 
 def _findings_summary_table(photos, sty):
-    header = ["#", "Area", "Defect Category", "Comment", "Classification"]
+    header = ["#", "Area", "Defect Category", "AMM Reference", "Comment", "Classification"]
     rows = [header]
     for idx, photo in enumerate(photos, start=1):
         classification = _get_classification(photo)
         color = SEVERITY_COLORS.get(classification, colors.grey).hexval()
         comment = _get_comment(photo) or "—"
+        amm_ref = _get_amm_reference(photo) or "—"
         rows.append([
             str(idx),
             _get_area(photo),
             _get_defect_category(photo),
-            comment[:60] + ("…" if len(comment) > 60 else ""),
+            amm_ref[:40] + ("…" if len(amm_ref) > 40 else ""),
+            comment[:40] + ("…" if len(comment) > 40 else ""),
             Paragraph(f'<font color="{color}"><b>{classification.upper()}</b></font>', sty["body"]),
         ])
 
-    table = Table(rows, colWidths=[1 * cm, 3 * cm, 3.5 * cm, 6 * cm, 3 * cm], repeatRows=1)
+    table = Table(rows, colWidths=[0.8 * cm, 2.5 * cm, 2.8 * cm, 3.5 * cm, 3.5 * cm, 2.5 * cm], repeatRows=1)
     table.setStyle(
         TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), BRAND_PRIMARY),
@@ -559,6 +574,22 @@ def generate_borescope_report(report_data, photos, output_path, logo_path=None, 
         ]))
         story.append(meta_row)
         story.append(Spacer(1, 0.25 * cm))
+
+        amm_ref = _get_amm_reference(photo)
+        if amm_ref:
+            amm_box = Table(
+                [[Paragraph(f"<b>AMM Reference:</b> {amm_ref}", sty["body"])]],
+                colWidths=[17 * cm],
+            )
+            amm_box.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F0FDF4")),
+                ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#86EFAC")),
+                ("TOPPADDING", (0, 0), (-1, -1), 6),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ]))
+            story.append(amm_box)
+            story.append(Spacer(1, 0.2 * cm))
 
         img_path = photo.get("path")
         if img_path and os.path.exists(img_path):

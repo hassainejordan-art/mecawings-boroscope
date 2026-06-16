@@ -1,0 +1,173 @@
+{% extends "base.html" %}
+
+{% block title %}AMM Library{% endblock %}
+
+{% block content %}
+<section class="page-hero">
+    <h1>AMM Library</h1>
+    <p class="hero-subtitle">Upload and manage Aircraft Maintenance Manual references organized by aircraft, engine and ATA chapter</p>
+</section>
+
+<div class="ai-advisory-banner" role="note">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="ai-advisory-icon" aria-hidden="true">
+        <path d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+    </svg>
+    <p>{{ ai_advisory_warning }}</p>
+</div>
+
+<section class="card">
+    <div class="card-header">
+        <h2>Upload AMM Document</h2>
+    </div>
+    <form method="POST" action="{{ url_for('amm_library_upload') }}" enctype="multipart/form-data" class="upload-form">
+        <div class="form-grid">
+            <div class="form-group">
+                <label for="upload_aircraft_type">Aircraft Type <span class="required">*</span></label>
+                <select id="upload_aircraft_type" name="aircraft_type" required>
+                    {% for ac in aircraft_types %}
+                    <option value="{{ ac }}">{{ ac }}</option>
+                    {% endfor %}
+                    <option value="{{ custom_option }}">Other (custom)</option>
+                </select>
+            </div>
+            <div class="form-group" id="upload-aircraft-custom-wrap" hidden>
+                <label for="upload_aircraft_custom">Custom Aircraft Type</label>
+                <input type="text" id="upload_aircraft_custom" name="aircraft_custom" placeholder="Enter aircraft type">
+            </div>
+            <div class="form-group">
+                <label for="upload_engine_type">Engine Type <span class="required">*</span></label>
+                <select id="upload_engine_type" name="engine_type" required>
+                    {% for group, engines in engine_type_groups.items() %}
+                    <optgroup label="{{ group }}">
+                        {% for eng in engines %}
+                        <option value="{{ eng }}">{{ eng }}</option>
+                        {% endfor %}
+                    </optgroup>
+                    {% endfor %}
+                    <option value="{{ custom_option }}">Other (custom)</option>
+                </select>
+            </div>
+            <div class="form-group" id="upload-engine-custom-wrap" hidden>
+                <label for="upload_engine_custom">Custom Engine Type</label>
+                <input type="text" id="upload_engine_custom" name="engine_custom" placeholder="Enter engine type">
+            </div>
+            <div class="form-group">
+                <label for="ata_chapter">ATA Chapter <span class="required">*</span></label>
+                <select id="ata_chapter" name="ata_chapter" required>
+                    {% for ata in ata_chapters %}
+                    <option value="{{ ata }}">{{ ata }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="document_name">Document Name <span class="required">*</span></label>
+                <input type="text" id="document_name" name="document_name" required placeholder="e.g. CFM56-7B AMM">
+            </div>
+            <div class="form-group">
+                <label for="revision">Revision</label>
+                <input type="text" id="revision" name="revision" placeholder="e.g. Rev 45 / 2024-03">
+            </div>
+            <div class="form-group form-group-full">
+                <label for="amm_pdf">PDF File <span class="required">*</span></label>
+                <input type="file" id="amm_pdf" name="amm_pdf" accept="application/pdf,.pdf" required>
+            </div>
+        </div>
+        <div class="search-actions">
+            <button type="submit" class="btn btn-primary">Upload Document</button>
+        </div>
+    </form>
+</section>
+
+<section class="card">
+    <div class="card-header">
+        <h2>Search Documents</h2>
+    </div>
+    <form method="GET" action="{{ url_for('amm_library') }}" class="search-form">
+        <div class="form-grid">
+            <div class="form-group">
+                <label for="search_aircraft_type">Aircraft Type</label>
+                <input type="text" id="search_aircraft_type" name="aircraft_type" placeholder="B737-800"
+                    value="{{ search.aircraft_type }}">
+            </div>
+            <div class="form-group">
+                <label for="search_engine_type">Engine Type</label>
+                <input type="text" id="search_engine_type" name="engine_type" placeholder="CFM56-7B"
+                    value="{{ search.engine_type }}">
+            </div>
+            <div class="form-group">
+                <label for="search_ata_chapter">ATA Chapter</label>
+                <input type="text" id="search_ata_chapter" name="ata_chapter" placeholder="72-00"
+                    value="{{ search.ata_chapter }}">
+            </div>
+            <div class="form-group">
+                <label for="search_document_name">Document Name</label>
+                <input type="text" id="search_document_name" name="document_name" placeholder="AMM"
+                    value="{{ search.document_name }}">
+            </div>
+            <div class="form-group">
+                <label for="search_revision">Revision</label>
+                <input type="text" id="search_revision" name="revision" placeholder="Rev"
+                    value="{{ search.revision }}">
+            </div>
+        </div>
+        <div class="search-actions">
+            <button type="submit" class="btn btn-primary">Search</button>
+            <a href="{{ url_for('amm_library') }}" class="btn btn-secondary">Clear</a>
+        </div>
+    </form>
+</section>
+
+<section class="card">
+    <div class="card-header">
+        <h2>AMM Documents</h2>
+        <span class="photo-count-badge">{{ results|length }} document{% if results|length != 1 %}s{% endif %}</span>
+    </div>
+
+    {% if results %}
+    <div class="history-table-wrap">
+        <table class="history-table amm-table">
+            <thead>
+                <tr>
+                    <th>Aircraft Type</th>
+                    <th>Engine Type</th>
+                    <th>ATA</th>
+                    <th>Document Name</th>
+                    <th>Revision</th>
+                    <th>Upload Date</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for doc in results %}
+                <tr>
+                    <td>{{ doc.aircraft_type }}</td>
+                    <td>{{ doc.engine_type }}</td>
+                    <td>{{ doc.ata_chapter }}</td>
+                    <td><strong>{{ doc.document_name }}</strong></td>
+                    <td>{{ doc.revision or '—' }}</td>
+                    <td>{{ doc.upload_date }}</td>
+                    <td class="history-actions">
+                        <a href="{{ url_for('amm_library_download', doc_id=doc.id) }}"
+                           class="btn btn-secondary btn-small">Download</a>
+                        <a href="{{ url_for('amm_library_view', doc_id=doc.id) }}" target="_blank" rel="noopener"
+                           class="btn btn-secondary btn-small">View</a>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="gallery-empty">
+        <p>No AMM documents found.{% if search.aircraft_type or search.engine_type or search.ata_chapter or search.document_name or search.revision %} Try adjusting your search.{% else %} Upload your first document above.{% endif %}</p>
+    </div>
+    {% endif %}
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    window.CUSTOM_OPTION = {{ custom_option | tojson }};
+</script>
+<script src="{{ url_for('static', filename='js/amm_library.js') }}"></script>
+{% endblock %}

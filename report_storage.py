@@ -1,7 +1,16 @@
 import json
 import os
 import re
-from datetime import datetime
+
+from database import (
+    get_report_by_key,
+    init_db,
+    list_all_reports as db_list_all_reports,
+    report_exists,
+    search_reports as db_search_reports,
+    upsert_report,
+)
+from report_numbering import report_number_from_folder_name
 
 REPORTS_SUBDIR = "reports"
 
@@ -40,7 +49,28 @@ def pdf_filename_for(report_number):
     return f"borescope_report_{report_number}.pdf"
 
 
-def load_metadata(report_dir):
+def _relative_pdf_path(base_dir, absolute_pdf_path):
+    if not absolute_pdf_path:
+        return None
+    return os.path.relpath(absolute_pdf_path, base_dir)
+
+
+def _absolute_pdf_path(base_dir, pdf_path):
+    if not pdf_path:
+        return None
+    if os.path.isabs(pdf_path):
+        return pdf_path if os.path.exists(pdf_path) else None
+    absolute = os.path.join(base_dir, pdf_path)
+    return absolute if os.path.exists(absolute) else None
+
+
+def ensure_storage(base_dir):
+    """Initialize SQLite and migrate legacy metadata.json files once."""
+    init_db(base_dir)
+    return migrate_existing_reports(base_dir)
+
+
+def _load_legacy_metadata_json(report_dir):
     path = metadata_path(report_dir)
     if not os.path.exists(path):
         return None
@@ -48,88 +78,134 @@ def load_metadata(report_dir):
         return json.load(f)
 
 
-def save_metadata(report_dir, data):
-    os.makedirs(report_dir, exist_ok=True)
-    with open(metadata_path(report_dir), "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-def find_report_dir(base_dir, key):
-    """Find report folder by folder name, report number, or legacy id."""
-    if not key:
-        return None
-
-    safe_key = os.path.basename(key)
+def migrate_existing_reports(base_dir):
+    """Import reports from legacy metadata.json files into SQLite."""
     root = get_reports_root(base_dir)
     if not os.path.isdir(root):
-        return None
+        return 0
 
-    direct = os.path.join(root, safe_key)
-    if os.path.isdir(direct) and os.path.exists(metadata_path(direct)):
-        return direct
-
+    migrated = 0
     for entry in os.listdir(root):
         folder = os.path.join(root, entry)
         if not os.path.isdir(folder):
             continue
-        meta = load_metadata(folder)
+        if report_exists(base_dir, entry):
+            continue
+
+        meta = _load_legacy_metadata_json(folder)
         if not meta:
             continue
-        if (
-            meta.get("folder_name") == safe_key
-            or meta.get("report_number") == safe_key
-            or meta.get("id") == safe_key
-        ):
-            return folder
+
+        folder_name = meta.get("folder_name") or entry
+        report_number = (
+            meta.get("report_number")
+            or report_number_from_folder_name(entry)
+            or meta.get("id")
+            or entry
+        )
+        meta["folder_name"] = folder_name
+        meta["report_number"] = report_number
+
+        pdf_path = get_pdf_path(folder, report_number)
+        relative_pdf = _relative_pdf_path(base_dir, pdf_path)
+
+        upsert_report(base_dir, meta, pdf_path=relative_pdf)
+        migrated += 1
+
+    return migrated
+
+
+def load_metadata(base_dir, key):
+    """Load report metadata from SQLite by folder path, folder name, or report key."""
+    if key and (os.path.sep in key or key.startswith(base_dir)):
+        key = os.path.basename(key.rstrip(os.sep))
+
+    meta = get_report_by_key(base_dir, key)
+    if meta:
+        return meta
+
+    report_dir = get_report_dir(base_dir, key)
+    legacy = _load_legacy_metadata_json(report_dir)
+    if legacy:
+        folder_name = legacy.get("folder_name") or key
+        report_number = (
+            legacy.get("report_number")
+            or report_number_from_folder_name(key)
+            or legacy.get("id")
+            or key
+        )
+        legacy["folder_name"] = folder_name
+        legacy["report_number"] = report_number
+        pdf_path = get_pdf_path(report_dir, report_number)
+        return upsert_report(base_dir, legacy, pdf_path=_relative_pdf_path(base_dir, pdf_path))
+
+    return None
+
+
+def save_metadata(base_dir, report_dir, data, pdf_path=None):
+    """Persist report metadata to SQLite."""
+    folder_name = data.get("folder_name") or os.path.basename(report_dir)
+    data["folder_name"] = folder_name
+
+    if pdf_path is None:
+        pdf_path = data.get("pdf_path")
+    if pdf_path and os.path.isabs(pdf_path):
+        pdf_path = _relative_pdf_path(base_dir, pdf_path)
+
+    return upsert_report(base_dir, data, pdf_path=pdf_path)
+
+
+def find_report_dir(base_dir, key):
+    """Find report folder by folder name, report number, or legacy id."""
+    meta = get_report_by_key(base_dir, key)
+    if not meta:
+        return None
+
+    folder_name = meta.get("folder_name") or key
+    report_dir = get_report_dir(base_dir, os.path.basename(folder_name))
+    if os.path.isdir(report_dir):
+        return report_dir
     return None
 
 
 def list_all_reports(base_dir):
     """Return metadata dicts for every saved report, newest first."""
-    root = get_reports_root(base_dir)
-    if not os.path.isdir(root):
-        return []
-
-    reports = []
-    for entry in os.listdir(root):
-        folder = os.path.join(root, entry)
-        if not os.path.isdir(folder):
-            continue
-        meta = load_metadata(folder)
-        if meta:
-            meta = dict(meta)
-            meta["folder_name"] = meta.get("folder_name") or entry
-            reports.append(meta)
-
-    reports.sort(key=lambda r: r.get("updated_at") or r.get("created_at") or "", reverse=True)
-    return reports
+    return db_list_all_reports(base_dir)
 
 
 def search_reports(base_dir, engine_sn="", registration="", msn="", report_number=""):
     """Filter reports by optional search fields (partial, case-insensitive)."""
-    reports = list_all_reports(base_dir)
-
-    def match(value, query):
-        if not query:
-            return True
-        return query.lower() in (value or "").lower()
-
-    return [
-        r
-        for r in reports
-        if match(r.get("engine_sn", ""), engine_sn)
-        and match(r.get("registration", ""), registration)
-        and match(r.get("msn", ""), msn)
-        and match(r.get("report_number", ""), report_number)
-    ]
+    return db_search_reports(
+        base_dir,
+        engine_sn=engine_sn,
+        registration=registration,
+        msn=msn,
+        report_number=report_number,
+    )
 
 
-def get_pdf_path(report_dir, report_number):
+def get_pdf_path(report_dir, report_number, base_dir=None):
     named = os.path.join(report_dir, pdf_filename_for(report_number))
     if os.path.exists(named):
         return named
     pdfs = [f for f in os.listdir(report_dir) if f.endswith(".pdf")]
     return os.path.join(report_dir, pdfs[0]) if pdfs else None
+
+
+def resolve_pdf_path(base_dir, metadata):
+    """Return absolute PDF path from stored metadata."""
+    stored = metadata.get("pdf_path")
+    absolute = _absolute_pdf_path(base_dir, stored)
+    if absolute:
+        return absolute
+
+    folder_name = metadata.get("folder_name")
+    if not folder_name:
+        return None
+    report_dir = find_report_dir(base_dir, folder_name)
+    if not report_dir:
+        return None
+    return get_pdf_path(report_dir, metadata.get("report_number", ""))
 
 
 def photo_paths_for_metadata(base_dir, folder_name, photos_meta):
