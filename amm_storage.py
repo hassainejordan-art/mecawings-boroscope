@@ -400,14 +400,7 @@ def init_amm_storage(base_dir):
     os.makedirs(get_amm_files_root(base_dir), exist_ok=True)
     with get_connection(base_dir) as conn:
         _ensure_schema(conn)
-        conn.execute(
-            """
-            UPDATE amm_documents
-            SET index_status = ?
-            WHERE index_status = ?
-            """,
-            (INDEX_STATUS_UPLOADED, INDEX_STATUS_INDEXING),
-        )
+    reset_stuck_amm_indexing(base_dir)
     _migrate_amm_file_locations(base_dir)
     import_orphan_amm_pdfs(base_dir)
 
@@ -483,6 +476,38 @@ def list_unindexed_amm_document_ids(base_dir):
             (INDEX_STATUS_UPLOADED,),
         ).fetchall()
     return [row[0] for row in rows]
+
+
+def reset_stuck_amm_indexing(base_dir):
+    """Reset interrupted indexing jobs so they can be retried."""
+    with get_connection(base_dir) as conn:
+        conn.execute(
+            """
+            UPDATE amm_documents
+            SET index_status = ?, indexed = 0, index_error = NULL
+            WHERE index_status = ?
+            """,
+            (INDEX_STATUS_UPLOADED, INDEX_STATUS_INDEXING),
+        )
+
+
+def force_reindex_amm_document(base_dir, doc_id):
+    """Clear prior index state and extract text again."""
+    with get_connection(base_dir) as conn:
+        row = conn.execute(
+            "SELECT id FROM amm_documents WHERE id = ?",
+            (doc_id,),
+        ).fetchone()
+    if not row:
+        return None
+    _update_document_index(
+        base_dir,
+        doc_id,
+        extracted_text=None,
+        index_status=INDEX_STATUS_UPLOADED,
+        index_error=None,
+    )
+    return extract_and_index_amm_document(base_dir, doc_id)
 
 
 def mark_amm_indexing_failed(base_dir, doc_id, technical_error=None):
